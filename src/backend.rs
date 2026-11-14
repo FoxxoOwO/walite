@@ -1330,19 +1330,16 @@ fn extract_message_text(message: &wa::Message) -> &str {
         return "";
     }
     // Check for poll - the question doubles as the bubble text, the options
-    // are drawn from the structured payload.
-    for poll in [
-        message.poll_creation_message_v3.as_option(),
-        message.poll_creation_message_v2.as_option(),
-        message.poll_creation_message.as_option(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if let Some(name) = poll.name.as_deref() {
-            return name;
-        }
-        return "[Poll]";
+    // are drawn from the structured payload. The three payload fields are
+    // alternatives, not a list: the loop that used to sit here returned on its
+    // first iteration, so it read as iteration without ever iterating.
+    let poll = message
+        .poll_creation_message_v3
+        .as_option()
+        .or_else(|| message.poll_creation_message_v2.as_option())
+        .or_else(|| message.poll_creation_message.as_option());
+    if let Some(poll) = poll {
+        return poll.name.as_deref().unwrap_or("[Poll]");
     }
     // Check for poll update
     if message.poll_update_message.is_set() {
@@ -3282,7 +3279,15 @@ async fn handle_command(
         
         Command::RevokeMessage { chat_jid, message_id, is_admin, original_sender } => {
             let revoke_type = if is_admin {
-                whatsapp_rust::send::RevokeType::Admin { original_sender: original_sender.unwrap_or_else(|| client.pn().unwrap_or_else(|| client.lid().unwrap())) }
+                // Admin revoke needs the sender's JID. Falling back through the
+                // client's own identities and *panicking* on the last one meant a
+                // single unexpected event could take the whole app down; an error
+                // leaves the message unrevoked and the rest of the session intact.
+                let sender = original_sender
+                    .or_else(|| client.pn())
+                    .or_else(|| client.lid())
+                    .ok_or_else(|| anyhow::anyhow!("revoke: chybí odesílatel i vlastní identita"))?;
+                whatsapp_rust::send::RevokeType::Admin { original_sender: sender }
             } else {
                 whatsapp_rust::send::RevokeType::Sender
             };
