@@ -317,7 +317,7 @@ impl eframe::App for WarustApp {
         }
         
         // Persist final state
-        let _ = self.runtime.block_on(crate::storage::persist_state(&self.state));
+        self.runtime.block_on(crate::storage::persist_or_log(&self.state));
         
         info!("Shutdown complete");
     }

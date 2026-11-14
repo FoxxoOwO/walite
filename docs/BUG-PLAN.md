@@ -110,8 +110,8 @@ Postup, který se osvědčil u posledních dvou bugů:
 | BUG-20261114-01 | Instalátor používal `tar` z PATH (GNU tar), zip se nerozbalil, aplikace se restartovala ve staré verzi | P0 | opraveno v 0.3.2, kryto testem + sandboxem; uživatelé na 0.2.0–0.3.1 musí jednou ručně |
 | BUG-20261114-02 | Řádek v „Média, odkazy a dokumenty“ široký 944 px v panelu 300 px, přetekl přes konverzaci | P1 | opraveno (PR #26), kryto `gallery_rows_fit_the_panel_width` |
 | BUG-20261114-03 | Po kliknutí na odkaz v info panelu se objevilo přeškálované písmo; po opravě šířky neověřeno | P1 | **otevřeno** — čeká na reprodukci od uživatele (které kliknutí, jaká šířka okna) |
-| BUG-20261114-04 | Aplikace nepíše log do souboru, u odpojeného okna není co přiložit k hlášení | P2 | otevřeno — `%LOCALAPPDATA%\warust\warust.log` s rotací |
-| BUG-20261114-05 | 211 ignorovaných výsledků (`let _ =`), u zápisu stavu a session může selhat tiše | P2 | otevřeno — projít a ošetřit zápisy stavu |
+| BUG-20261114-04 | Aplikace nepíše log do souboru, u odpojeného okna není co přiložit k hlášení | P2 | opraveno — `%APPDATA%\warust\warust.log`, rotace při 2 MB na `warust.1.log`, kryto testy v `src/logging.rs` |
+| BUG-20261114-05 | 211 ignorovaných výsledků (`let _ =`), u zápisu stavu a session může selhat tiše | P2 | částečně opraveno — 26× `persist_state` jde přes `persist_or_log`, chyba se loguje; ostatní `let _ =` (kanály, úklid) zůstávají |
 | BUG-20261114-06 | `client.pn().unwrap_or_else(\|\| client.lid().unwrap())` (`src/backend.rs:3285`) — poslední `unwrap` bez fallbacku na datech ze sítě | P2 | opraveno (PR #29) — vrací chybu, zpráva zůstane neodvolaná |
 | BUG-20261114-07 | `cargo fmt --check` neprochází, formátování je v repu nekonzistentní | P3 | otevřeno — srovnat jednorázově, pak zapnout jako bránu |
 | BUG-20261114-08 | Nečinné okno si říkalo o frame každých 100 ms (`src/app.rs:297`), takže drželo GPU vzhůru a kreslilo tytéž pixely | P1 | opraveno (PR #29), kryto `idle_state_does_not_ask_for_animation_frames` |
