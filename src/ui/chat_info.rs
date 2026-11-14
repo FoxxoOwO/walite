@@ -321,36 +321,45 @@ fn media_gallery(ui: &mut egui::Ui, state: &mut AppState, chat: &Chat) {
                 .max_height(160.0)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    // Šířka řádku se musí změřit tady: řádek s dlouhou URL si
+                    // dřív vzal celou šířku odkazu (klidně 900 px), přetekl
+                    // panel a rozbil rozvržení celého okna.
+                    let row_size = egui::vec2(ui.available_width(), 24.0);
                     for (message_id, label) in &rows {
-                        ui.horizontal(|ui| {
-                            let icon = if tab == GalleryTab::Links { "🔗" } else { "📄" };
-                            if ui
-                                .add(
-                                    egui::Button::new(
+                        ui.allocate_ui_with_layout(
+                            row_size,
+                            Layout::right_to_left(Align::Center),
+                            |ui| {
+                                if tab == GalleryTab::Links
+                                    && ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new("Otevřít")
+                                                    .font(FontId::proportional(11.0)),
+                                            )
+                                            .frame(false),
+                                        )
+                                        .clicked()
+                                {
+                                    open_url = Some(label.clone());
+                                }
+                                let icon = if tab == GalleryTab::Links { "🔗" } else { "📄" };
+                                let row = ui.add(
+                                    egui::Label::new(
                                         RichText::new(format!("{icon} {label}"))
                                             .font(FontId::proportional(12.0)),
                                     )
-                                    .frame(false),
-                                )
-                                .on_hover_text("Zobrazit zprávu")
-                                .clicked()
-                            {
-                                jump_to = Some(message_id.clone());
-                            }
-                            if tab == GalleryTab::Links
-                                && ui
-                                    .add(
-                                        egui::Button::new(
-                                            RichText::new("Otevřít")
-                                                .font(FontId::proportional(11.0)),
-                                        )
-                                        .frame(false),
-                                    )
-                                    .clicked()
-                            {
-                                open_url = Some(label.clone());
-                            }
-                        });
+                                    // Zbytek šířky patří zkrácenému názvu, ne
+                                    // celému odkazu.
+                                    .wrap_mode(egui::TextWrapMode::Truncate)
+                                    .sense(egui::Sense::click()),
+                                );
+                                if row.clicked() {
+                                    jump_to = Some(message_id.clone());
+                                }
+                                row.on_hover_text(label);
+                            },
+                        );
                     }
                 });
         }
@@ -910,6 +919,49 @@ mod tests {
 
         let links = gallery_messages(&messages, GalleryTab::Links);
         assert_eq!(links.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["a"]);
+    }
+
+    /// Panel je široký ~320 px a řádek si dřív vzal šířku celé URL, takže
+    /// přetekl přes konverzaci a rozbil rozvržení celého okna.
+    #[test]
+    fn gallery_rows_fit_the_panel_width() {
+        let mut state = AppState::default();
+        let jid: Jid = "123@s.whatsapp.net".parse().unwrap();
+        let url = "https://www.alza.cz/coldrex-horky-napoj-s-kofeinem-rapid-petg-1-75mm-1kg-cardboard-spool-black-d12389185.htm";
+        state.messages.insert(
+            jid.clone(),
+            vec![
+                message("a", url, None),
+                message("b", url, Some(MediaType::Document)),
+            ],
+        );
+        let chat = Chat {
+            jid: jid.clone(),
+            name: "Petr".to_string(),
+            last_message: None,
+            unread_count: 0,
+            is_group: false,
+            is_archived: false,
+            is_pinned: false,
+            mute_until: None,
+            last_activity: Utc::now(),
+            participants: Default::default(),
+            is_typing: false,
+            typing_until: None,
+        };
+
+        for tab in [GalleryTab::Links, GalleryTab::Documents] {
+            state.gallery_tab = tab;
+            let ctx = egui::Context::default();
+            let mut width = 0.0;
+            let mut output = ctx.run_ui(Default::default(), |ui| {
+                ui.set_max_width(300.0);
+                media_gallery(ui, &mut state, &chat);
+                width = ui.min_rect().width();
+            });
+            output.textures_delta.clear();
+            assert!(width <= 300.0, "{tab:?} rows are {width} px wide");
+        }
     }
 
     #[test]
