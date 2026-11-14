@@ -7,6 +7,43 @@ also published on the [Releases page](https://github.com/FoxxoOwO/warust/release
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-14
+
+Saves work on this machine, lighter idle rendering, and a log file to attach to a
+bug report.
+
+### Fixed
+- Long links and document names in the chat info panel pushed the whole row past
+  the panel width and squeezed the conversation next to it. Rows now fit the panel
+  and the name is truncated instead of stretched.
+- The window asked the compositor for a new frame ten times a second even when
+  nothing was happening (typing indicator, jump flash, queue drain). Repaints are
+  now driven by actual animation state with a one second fallback, so an idle
+  window costs almost nothing.
+- Revoking an admin message could panic on `client.lid().unwrap()` when the client
+  had no linked-device identity; it now tries the original sender, PN, then LID and
+  returns a clear error instead of panicking.
+- A failed state save was silently dropped at 26 call sites (`let _ =`), which on a
+  full disk means a sent message disappears after a restart with no trace. The
+  error is logged now, and so is a failed `current_session.txt` write.
+
+### Added
+- `%APPDATA%\warust\warust.log`: the app logs to a file next to the session
+  database and rotates at 2 MB to `warust.1.log`, so a window that was never
+  attached to a console still leaves evidence behind.
+- `warust.exe --test-update`: downloads the latest package and unpacks it with the
+  system tar into a temporary folder without installing anything, checks that a
+  runnable `warust.exe` came out of it, then cleans up. This tests the installer
+  path on a machine that has nothing newer to install.
+
+### Changed
+- Message list work per frame is smaller: one arrival-window snapshot per frame
+  instead of three map lookups per visible bubble, and only the newest 30 messages
+  are tracked for fade-in instead of the whole history.
+- `docs/QA-PLAN.md` (verification steps, smoke matrix, bug capture protocol) and
+  `docs/BUG-PLAN.md` (findings log, fix and verification protocol) are now part of
+  the repository.
+
 ## [0.3.2] - 2026-11-14
 
 The built-in updater actually installs the update now.
