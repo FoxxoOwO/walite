@@ -7,7 +7,7 @@ also published on the [Releases page](https://github.com/FoxxoOwO/warust/release
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-11-14
+## [0.3.1] - 2026-11-14
 
 Updates arrive on their own from this version on, and the interface finally
 moves instead of snapping.
