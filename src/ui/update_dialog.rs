@@ -4,7 +4,7 @@ use egui::{Color32, RichText};
 
 use crate::state::SharedState;
 use crate::theme::ACCENT;
-use crate::updater::{self, CURRENT_VERSION};
+use crate::updater::{self, UpdateStatus, CURRENT_VERSION};
 
 /// Vykreslí okno aktualizace, pokud je otevřené.
 pub fn show_update_dialog(ctx: &egui::Context, state: &SharedState) {
@@ -70,8 +70,9 @@ pub fn show_update_dialog(ctx: &egui::Context, state: &SharedState) {
                                 )
                                 .clicked()
                             {
+                                // Okno zůstává otevřené: stahování běží na pozadí
+                                // a případná chyba se musí mít kde ukázat.
                                 install = true;
-                                close = true;
                             }
                         }
                         if ui.button("Stránka vydání").clicked() {
@@ -95,6 +96,15 @@ pub fn show_update_dialog(ctx: &egui::Context, state: &SharedState) {
                                 .size(11.0)
                                 .color(Color32::from_rgb(0xE0, 0xA0, 0x40)),
                         );
+                    }
+                    if status.is_busy() || matches!(status, UpdateStatus::Failed(_)) {
+                        ui.add_space(4.0);
+                        let color = if matches!(status, UpdateStatus::Failed(_)) {
+                            Color32::from_rgb(0xE0, 0x70, 0x70)
+                        } else {
+                            Color32::from_gray(170)
+                        };
+                        ui.label(RichText::new(status.label()).size(11.0).color(color));
                     }
                     if auto_install {
                         ui.label(
@@ -129,6 +139,11 @@ pub fn show_update_dialog(ctx: &egui::Context, state: &SharedState) {
 
     if let Some(url) = open_page {
         ctx.open_url(egui::OpenUrl::new_tab(url));
+    }
+    // Stahování i kontrola běží na pozadí, takže si okno musí vyžádat
+    // překreslení samo, jinak by o výsledku nevědělo.
+    if status.is_busy() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
     }
     if install {
         if let Some(info) = available.clone() {

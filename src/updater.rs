@@ -60,7 +60,7 @@ impl UpdateStatus {
             UpdateStatus::UpToDate => "Máš nejnovější verzi.".to_string(),
             UpdateStatus::Available(version) => format!("Dostupná verze {}.", version),
             UpdateStatus::Downloading => "Stahuji aktualizaci…".to_string(),
-            UpdateStatus::Failed(error) => format!("Kontrola selhala: {}", error),
+            UpdateStatus::Failed(error) => format!("Chyba: {}", error),
         }
     }
 
@@ -167,6 +167,81 @@ pub fn download(url: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Skript pro Windows, který počká na ukončení procesu, rozbalí archiv a
+/// aplikaci znovu spustí.
+///
+/// `tar` se volá přes `%SystemRoot%\System32\tar.exe`, protože `cmd` najde na
+/// PATH dřív `tar` z Gitu (GNU tar), a ten umí jen tar archivy — náš balíček je
+/// zip, takže s ním tiše selhal a aplikace se znovu otevřela ve staré verzi.
+/// Když bsdtar chybí (Windows starší než 1803), rozbaluje PowerShell.
+#[cfg(windows)]
+fn windows_update_script(pid: u32, dir: &Path, exe: &Path, archive: &Path) -> String {
+    let exe_name = exe
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "warust.exe".to_string());
+    format!(
+        "@echo off\r\n\
+         :wait\r\n\
+         tasklist /FI \"PID eq {pid}\" | find \"{pid}\" >nul\r\n\
+         if not errorlevel 1 (\r\n\
+         \x20 timeout /t 1 /nobreak >nul\r\n\
+         \x20 goto wait\r\n\
+         )\r\n\
+         set \"LOG=%TEMP%\\warust-update.log\"\r\n\
+         set \"ZIP={zip}\"\r\n\
+         set \"DIR={dir}\"\r\n\
+         set \"STAGE=%TEMP%\\warust-unpack\"\r\n\
+         echo --- aktualizace %DATE% %TIME% >>\"%LOG%\"\r\n\
+         if exist \"%STAGE%\" rmdir /s /q \"%STAGE%\"\r\n\
+         mkdir \"%STAGE%\"\r\n\
+         set \"TAR=%SystemRoot%\\System32\\tar.exe\"\r\n\
+         if exist \"%TAR%\" \"%TAR%\" -xf \"%ZIP%\" -C \"%STAGE%\" >>\"%LOG%\" 2>&1\r\n\
+         if not exist \"%STAGE%\\{exe_name}\" powershell -NoProfile -ExecutionPolicy Bypass -Command \"Expand-Archive -LiteralPath '%ZIP%' -DestinationPath '%STAGE%' -Force\" >>\"%LOG%\" 2>&1\r\n\
+         if exist \"%STAGE%\\{exe_name}\" (\r\n\
+         \x20 copy /y \"%STAGE%\\{exe_name}\" \"%DIR%\\{exe_name}\" >>\"%LOG%\" 2>&1\r\n\
+         \x20 for %%F in (ffmpeg.exe ffprobe.exe FFMPEG-NOTICE.txt) do if exist \"%STAGE%\\%%F\" copy /y \"%STAGE%\\%%F\" \"%DIR%\\%%F\" >>\"%LOG%\" 2>&1\r\n\
+         \x20 rmdir /s /q \"%STAGE%\"\r\n\
+         ) else (\r\n\
+         \x20 echo rozbaleni selhalo, zustava stara verze >>\"%LOG%\"\r\n\
+         )\r\n\
+         del \"%ZIP%\"\r\n\
+         start \"\" \"%DIR%\\{exe_name}\"\r\n\
+         del \"%~f0\"\r\n",
+        pid = pid,
+        dir = dir.display(),
+        zip = archive.display(),
+        exe_name = exe_name,
+    )
+}
+
+/// Skript pro Unix, který počká na ukončení procesu, rozbalí archiv a aplikaci
+/// znovu spustí.
+#[cfg(not(windows))]
+fn unix_update_script(pid: u32, dir: &Path, exe: &Path, archive: &Path) -> String {
+    format!(
+        "#!/bin/sh\n\
+         log=\"${{TMPDIR:-/tmp}}/warust-update.log\"\n\
+         stage=\"${{TMPDIR:-/tmp}}/warust-unpack\"\n\
+         while kill -0 {pid} 2>/dev/null; do sleep 1; done\n\
+         rm -rf \"$stage\"\n\
+         mkdir -p \"$stage\"\n\
+         if tar -xzf \"{zip}\" -C \"$stage\" >>\"$log\" 2>&1; then\n\
+         \x20 cp -f \"$stage\"/* \"{dir}/\" >>\"$log\" 2>&1\n\
+         \x20 echo aktualizace rozbalena >>\"$log\"\n\
+         else\n\
+         \x20 echo rozbaleni selhalo, zustava stara verze >>\"$log\"\n\
+         fi\n\
+         rm -rf \"$stage\"\n\
+         rm -f \"{zip}\"\n\
+         \"{exe}\" >/dev/null 2>&1 &\n",
+        pid = pid,
+        dir = dir.display(),
+        exe = exe.display(),
+        zip = archive.display(),
+    )
+}
+
 /// Rozbalí archiv, přepíše spustitelný soubor a aplikaci znovu spustí.
 ///
 /// Na Windows je běžící `.exe` zamčené, proto výměnu provádí odpojený batch
@@ -180,27 +255,11 @@ pub fn install_and_restart(archive: &Path) -> Result<()> {
 
     #[cfg(windows)]
     {
-        let pid = std::process::id();
         let script = std::env::temp_dir().join("warust-update.cmd");
-        let body = format!(
-            "@echo off\r\n\
-             :wait\r\n\
-             tasklist /FI \"PID eq {pid}\" | find \"{pid}\" >nul\r\n\
-             if not errorlevel 1 (\r\n\
-             \x20 timeout /t 1 /nobreak >nul\r\n\
-             \x20 goto wait\r\n\
-             )\r\n\
-             cd /d \"{dir}\"\r\n\
-             tar -xf \"{zip}\" -C \"{dir}\"\r\n\
-             start \"\" \"{exe}\"\r\n\
-             del \"{zip}\"\r\n\
-             del \"%~f0\"\r\n",
-            pid = pid,
-            dir = dir.display(),
-            exe = exe.display(),
-            zip = archive.display(),
-        );
-        std::fs::write(&script, body)?;
+        std::fs::write(
+            &script,
+            windows_update_script(std::process::id(), &dir, &exe, archive),
+        )?;
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         std::process::Command::new("cmd")
@@ -213,19 +272,10 @@ pub fn install_and_restart(archive: &Path) -> Result<()> {
     #[cfg(not(windows))]
     {
         let script = std::env::temp_dir().join("warust-update.sh");
-        let body = format!(
-            "#!/bin/sh\n\
-             while kill -0 {pid} 2>/dev/null; do sleep 1; done\n\
-             cd \"{dir}\" || exit 1\n\
-             tar -xzf \"{zip}\" -C \"{dir}\"\n\
-             \"{exe}\" >/dev/null 2>&1 &\n\
-             rm -f \"{zip}\"\n",
-            pid = std::process::id(),
-            dir = dir.display(),
-            exe = exe.display(),
-            zip = archive.display(),
-        );
-        std::fs::write(&script, body)?;
+        std::fs::write(
+            &script,
+            unix_update_script(std::process::id(), &dir, &exe, archive),
+        )?;
         {
             use std::os::unix::fs::PermissionsExt;
             let mut perms = std::fs::metadata(&script)?.permissions();
@@ -325,6 +375,49 @@ pub fn spawn_periodic_check(state: SharedState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `cmd` má na PATH dřív GNU tar z Gitu, který zip nerozbalí, takže skript
+    /// musí sáhnout po systémovém bsdtaru a mít záložní cestu přes PowerShell.
+    #[cfg(windows)]
+    #[test]
+    fn windows_script_extracts_with_the_system_tar() {
+        let script = windows_update_script(
+            4242,
+            Path::new(r"C:\Apps\Warust"),
+            Path::new(r"C:\Apps\Warust\warust.exe"),
+            Path::new(r"C:\Temp\warust-v0.3.1-windows-x86_64.zip"),
+        );
+        assert!(
+            script.contains(r"%SystemRoot%\System32\tar.exe"),
+            "{script}"
+        );
+        assert!(script.contains("Expand-Archive"), "{script}");
+        assert!(
+            script.contains(r#"copy /y "%STAGE%\warust.exe" "%DIR%\warust.exe""#),
+            "{script}"
+        );
+        assert!(script.contains("PID eq 4242"), "{script}");
+        assert!(
+            script.contains(r#"start "" "%DIR%\warust.exe""#),
+            "{script}"
+        );
+        // Stará verze zůstává, když rozbalení selže.
+        assert!(script.contains("zustava stara verze"), "{script}");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_script_extracts_then_restarts() {
+        let script = unix_update_script(
+            4242,
+            Path::new("/opt/warust"),
+            Path::new("/opt/warust/warust"),
+            Path::new("/tmp/warust-v0.3.1-linux-x86_64.tar.gz"),
+        );
+        assert!(script.contains("tar -xzf"), "{script}");
+        assert!(script.contains("zustava stara verze"), "{script}");
+        assert!(script.contains(r#""/opt/warust/warust""#), "{script}");
+    }
 
     #[test]
     fn newer_versions_are_detected() {
