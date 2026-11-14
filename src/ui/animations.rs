@@ -102,25 +102,42 @@ pub fn track_arrivals<'a>(
     });
 }
 
-/// Eased fade-in for one tracked id. 1.0 means "fully there, nothing to do";
-/// the newest messages start a few milliseconds after the one above them.
-pub fn arrival_alpha(ctx: &Context, id: Id, msg_id: &str, duration: f32, stagger: f32) -> f32 {
-    let now = ctx.input(|i| i.time);
-    let stamped = ctx.data_mut(|d| {
-        d.get_temp_mut_or_default::<ArrivalState>(id)
-            .seen
-            .get(msg_id)
-            .copied()
-    });
-    let Some((first, ordinal)) = stamped else {
-        return 1.0;
-    };
-    let delay = ordinal as f64 * stagger as f64;
-    let t = ((now - first - delay) as f32 / duration.max(0.001)).clamp(0.0, 1.0);
-    if t < 1.0 {
-        ctx.request_repaint();
+/// One frame's copy of the tracked window.
+///
+/// The render loop used to reach into the context once per bubble. With a few
+/// thousand messages of history that is a few thousand map lookups and locks in
+/// every frame, for a window that only ever holds [`ARRIVALS_WINDOW`] ids.
+/// Copying that window once and answering from it is the same work for a short
+/// chat and stops the per-bubble cost from scaling with history length.
+pub struct Arrivals {
+    seen: HashMap<String, (f64, u32)>,
+}
+
+impl Arrivals {
+    /// Eased fade-in for one tracked id; 1.0 when it is already there.
+    pub fn alpha(&self, now: f64, msg_id: &str, duration: f32, stagger: f32) -> f32 {
+        let Some((first, ordinal)) = self.seen.get(msg_id).copied() else {
+            return 1.0;
+        };
+        let delay = ordinal as f64 * stagger as f64;
+        let t = ((now - first - delay) as f32 / duration.max(0.001)).clamp(0.0, 1.0);
+        ease_out_cubic(t)
     }
-    ease_out_cubic(t)
+
+    /// True while at least one tracked id is still fading in, so the caller can
+    /// ask for the next frame once instead of per bubble.
+    pub fn is_fading(&self, now: f64, duration: f32, stagger: f32) -> bool {
+        self.seen.values().any(|(first, ordinal)| {
+            let delay = *ordinal as f64 * stagger as f64;
+            (now - first - delay) as f32 / duration.max(0.001) < 1.0
+        })
+    }
+}
+
+/// Take the tracked window out of the context for this frame.
+pub fn arrivals_snapshot(ctx: &Context, id: Id) -> Arrivals {
+    let seen = ctx.data_mut(|d| d.get_temp_mut_or_default::<ArrivalState>(id).seen.clone());
+    Arrivals { seen }
 }
 
 /// Paint 3 bouncing dots directly with a painter
@@ -235,9 +252,10 @@ mod tests {
         let id = Id::unique("test_arrivals");
         let raw = ["a", "b"];
         track_arrivals(&ctx, id, raw.iter().copied(), 8);
-        let first = arrival_alpha(&ctx, id, "a", 0.18, 0.0);
+        let now = ctx.input(|i| i.time);
+        let first = arrivals_snapshot(&ctx, id).alpha(now, "a", 0.18, 0.0);
         // Unknown ids are treated as already settled, so old rows are untouched.
-        assert_eq!(arrival_alpha(&ctx, id, "zzz", 0.18, 0.0), 1.0);
+        assert_eq!(arrivals_snapshot(&ctx, id).alpha(now, "zzz", 0.18, 0.0), 1.0);
 
         let mut output = ctx.run_ui(Default::default(), |ui| {
             ui.label("advance a frame");
@@ -246,6 +264,35 @@ mod tests {
 
         track_arrivals(&ctx, id, raw.iter().copied(), 8);
         // Same ids again: the clock keeps running instead of restarting at zero.
-        assert!(arrival_alpha(&ctx, id, "a", 0.18, 0.0) >= first);
+        let later = ctx.input(|i| i.time);
+        assert!(arrivals_snapshot(&ctx, id).alpha(later, "a", 0.18, 0.0) >= first);
+    }
+
+    /// The per-frame snapshot answers like the context lookup it replaced, and a
+    /// long history only ever tracks and fades in its tail.
+    #[test]
+    fn snapshot_tracks_only_the_tail_of_a_long_history() {
+        let ctx = egui::Context::default();
+        let id = Id::unique("test_snapshot");
+        let history: Vec<String> = (0..200).map(|i| format!("m{i}")).collect();
+        let tail_start = history.len() - 5;
+        track_arrivals(
+            &ctx,
+            id,
+            history[tail_start..].iter().map(|s| s.as_str()),
+            5,
+        );
+
+        let now = ctx.input(|i| i.time);
+        let arrivals = arrivals_snapshot(&ctx, id);
+        // Anything that scrolled out of the window is settled, so going back up
+        // the history never fades old messages in again.
+        assert_eq!(arrivals.alpha(now, "m0", 0.18, 0.0), 1.0);
+        // The newest message starts at zero and fades from there.
+        assert_eq!(arrivals.alpha(now, "m199", 0.18, 0.0), 0.0);
+        // The caller gets one "still fading" for the whole frame...
+        assert!(arrivals.is_fading(now, 0.18, 0.0));
+        // ...and silence once the window has run, so the frame clock can stop.
+        assert!(!arrivals.is_fading(now + 10.0, 0.18, 0.0));
     }
 }

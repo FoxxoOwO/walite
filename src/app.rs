@@ -292,9 +292,20 @@ impl eframe::App for WarustApp {
             }
         }
 
-        // Sync runs quietly on the background without any popup toast
-        // Request repaint for animations
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        // Sync runs quietly on the background without any popup toast.
+        //
+        // This used to ask for a frame ten times a second, always, "for
+        // animations" — so an idle window woke the GPU up 10× per second just to
+        // draw the same pixels. Only a jump flash or a typing indicator is driven
+        // by a clock; hovers, transitions, incoming messages and video playback
+        // each ask for their own frames. Idle drops to one wake-up per second,
+        // which is enough to notice anything that arrives without a repaint.
+        let animating = self.state.read().animating();
+        ui.ctx().request_repaint_after(if animating {
+            std::time::Duration::from_millis(100)
+        } else {
+            std::time::Duration::from_millis(1000)
+        });
     }
     
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

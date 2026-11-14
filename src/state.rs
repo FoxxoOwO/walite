@@ -962,6 +962,25 @@ impl AppState {
         Self::default()
     }
 
+    /// Whether anything on screen moves on its own right now.
+    ///
+    /// The window used to be repainted ten times a second forever "for
+    /// animations", which keeps the GPU busy in a chat that is standing still.
+    /// Only two things here are driven by a clock: the jump flash fading out and
+    /// a typing indicator switching off. Everything else — hovers, pane
+    /// transitions, arriving messages, video — asks egui for its own frames.
+    pub fn animating(&self) -> bool {
+        let flashing = self
+            .jump_target
+            .as_ref()
+            .is_some_and(|target| !target.expired());
+        flashing
+            || self
+                .chats
+                .values()
+                .any(|chat| chat.typing_until.is_some_and(|until| until > Utc::now()))
+    }
+
     /// Remember the composer text under `chat` and clear it for the next one.
     /// Blank text is not worth a draft, so any old entry is dropped instead.
     pub fn stash_draft(&mut self, chat: &Jid) {
@@ -1767,6 +1786,46 @@ mod tests {
 
 
     use super::*;
+
+    /// An idle window must not ask for animation frames: that clock is what kept
+    /// the GPU busy at ten frames a second with nothing on screen moving.
+    #[test]
+    fn idle_state_does_not_ask_for_animation_frames() {
+        let mut state = AppState::new();
+        assert!(!state.animating());
+
+        // A chat that is not typing is not animating either.
+        let alice = Jid::pn("111");
+        state.get_or_create_chat(alice.clone(), "Alice".into(), false);
+        assert!(!state.animating());
+
+        // Typing dots run on their own clock until `typing_until` passes.
+        state.chats.get_mut(&alice).unwrap().typing_until =
+            Some(Utc::now() + chrono::Duration::seconds(5));
+        assert!(state.animating());
+
+        state.chats.get_mut(&alice).unwrap().typing_until =
+            Some(Utc::now() - chrono::Duration::seconds(5));
+        assert!(!state.animating());
+    }
+
+    #[test]
+    fn a_jump_flash_keeps_frames_coming_only_while_it_fades() {
+        let mut state = AppState::new();
+        state.jump_target = Some(JumpTarget::new("m1"));
+        assert!(state.animating());
+
+        // Expired flashes stay in the state (the tint is read from it) but must
+        // not hold the frame clock open for another 2.5 seconds.
+        state.jump_target = Some(JumpTarget {
+            message_id: "m1".into(),
+            at: std::time::Instant::now()
+                - JumpTarget::LIFETIME
+                - std::time::Duration::from_millis(50),
+            scrolled: true,
+        });
+        assert!(!state.animating());
+    }
 
     #[test]
     fn archived_chats_are_split_out_unless_searching() {

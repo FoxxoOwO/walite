@@ -1,6 +1,9 @@
 //! Conversation View UI - WhatsApp Web/Desktop style
 
 use egui::{Align, Color32, Context, FontId, Frame, Key, Layout, Margin, RichText, ScrollArea, TextEdit, Ui, Widget};
+
+/// Delay between two new messages of the same batch fading in.
+const ARRIVAL_STAGGER: f32 = 0.015;
 use crate::state::{AppState, SharedState, Message};
 use crate::ui::components::{MessageBubble, Avatar};
 use crate::util::format_jid;
@@ -500,12 +503,26 @@ fn show_messages_area(ui: &mut Ui, state: &mut AppState, chat: &crate::state::Ch
     // of the history is tracked, which is where incoming messages land.
     const ARRIVALS_WINDOW: usize = 30;
     let arrivals_id = egui::Id::unique(("conv_arrivals", chat_jid.to_string()));
+    // Only the tail is tracked, and only the tail is worth walking: passing the
+    // whole history here used to allocate a pointer per message on every frame.
+    let tail_start = messages.len().saturating_sub(ARRIVALS_WINDOW);
     crate::ui::animations::track_arrivals(
         ui.ctx(),
         arrivals_id,
-        messages.iter().map(|m| m.id.as_str()),
+        messages[tail_start..].iter().map(|m| m.id.as_str()),
         ARRIVALS_WINDOW,
     );
+    // Read the tracked window once for this frame; the bubbles below query it
+    // without touching the context again.
+    let arrivals = crate::ui::animations::arrivals_snapshot(ui.ctx(), arrivals_id);
+    let frame_time = ui.ctx().input(|i| i.time);
+    if arrivals.is_fading(
+        frame_time,
+        crate::ui::animations::MEDIUM,
+        ARRIVAL_STAGGER,
+    ) {
+        ui.ctx().request_repaint();
+    }
 
     ScrollArea::vertical()
         .animated(true)
@@ -576,12 +593,11 @@ fn show_messages_area(ui: &mut Ui, state: &mut AppState, chat: &crate::state::Ch
                     } else {
                         0.0
                     };
-                    let arrival = crate::ui::animations::arrival_alpha(
-                        ui.ctx(),
-                        arrivals_id,
+                    let arrival = arrivals.alpha(
+                        frame_time,
                         &msg.id,
                         crate::ui::animations::MEDIUM,
-                        0.015,
+                        ARRIVAL_STAGGER,
                     );
                     let draft_for_msg = if draft_owner
                         .as_ref()
