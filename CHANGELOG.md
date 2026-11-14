@@ -7,6 +7,22 @@ also published on the [Releases page](https://github.com/FoxxoOwO/warust/release
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-14
+
+The built-in updater actually installs the update now.
+
+### Fixed
+- "Download and install" did nothing: the update script called `tar` from `PATH`,
+  which on Windows resolves to the GNU tar shipped with Git. Tar archives only, no
+  zip, so extraction failed silently, the app exited and came back as the old
+  version. The script now uses `%SystemRoot%\System32\tar.exe` and falls back to
+  PowerShell `Expand-Archive`.
+- The package is unpacked into a temporary folder first, so a failed extraction
+  leaves the previous version in place instead of a half-written install, and why
+  it failed is recorded in `%TEMP%\warust-update.log`.
+- The update dialog stays open while downloading, shows progress and reports a
+  failed download instead of closing as if nothing happened.
+
 ## [0.3.1] - 2026-11-14
 
 Updates arrive on their own from this version on, and the interface finally
