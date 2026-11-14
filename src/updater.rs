@@ -138,10 +138,11 @@ pub fn parse_release(json: &serde_json::Value, suffix: &str) -> Option<UpdateInf
     })
 }
 
-/// Zeptá se GitHubu na nejnovější vydání.
+/// Zeptá se GitHubu na nejnovější vydání bez ohledu na nainstalovanou verzi.
 ///
-/// Vrací `Ok(None)`, když je nainstalovaná verze stejná nebo novější.
-pub fn fetch_latest() -> Result<Option<UpdateInfo>> {
+/// `fetch_latest` navíc filtruje podle `is_newer`; diagnostika (`--test-update`)
+/// potřebuje i to, co je stejné, aby šlo ověřit balíček, který zrovna vyšel.
+pub fn fetch_latest_release() -> Result<Option<UpdateInfo>> {
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
     let mut response = ureq::get(&url)
         .header("User-Agent", USER_AGENT)
@@ -149,8 +150,14 @@ pub fn fetch_latest() -> Result<Option<UpdateInfo>> {
         .call()?;
     let body = response.body_mut().read_to_string()?;
     let json: serde_json::Value = serde_json::from_str(&body)?;
-    let info = parse_release(&json, asset_suffix());
-    Ok(info.filter(|info| is_newer(CURRENT_VERSION, &info.version)))
+    Ok(parse_release(&json, asset_suffix()))
+}
+
+/// Zeptá se GitHubu na nejnovější vydání.
+///
+/// Vrací `Ok(None)`, když je nainstalovaná verze stejná nebo novější.
+pub fn fetch_latest() -> Result<Option<UpdateInfo>> {
+    Ok(fetch_latest_release()?.filter(|info| is_newer(CURRENT_VERSION, &info.version)))
 }
 
 /// Stáhne balíček do dočasné složky a vrátí cestu k němu.
@@ -246,6 +253,106 @@ fn unix_update_script(pid: u32, dir: &Path, exe: &Path, archive: &Path) -> Strin
 ///
 /// Na Windows je běžící `.exe` zamčené, proto výměnu provádí odpojený batch
 /// skript, který nejdřív počká na ukončení tohoto procesu.
+/// Seznam souborů ve stagingu a jestli mezi nimi je spustitelný `warust.exe`.
+///
+/// Oddělené od stahování, aby šlo ověřit bez sítě: instalace je hotová jen když
+/// v rozbalené složce leží spustitelný soubor, ne jen „tar nespadl“.
+fn inspect_staging(dir: &Path) -> Result<(Vec<(String, u64)>, bool)> {
+    let mut files = Vec::new();
+    let mut has_exe = false;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        if name == "warust.exe" || name == "warust" {
+            has_exe = std::fs::read(&path)
+                .map(|head| head.len() >= 2 && (&head[..2] == b"MZ" || &head[..2] == b"E"))
+                .unwrap_or(false);
+        }
+        files.push((name, size));
+    }
+    files.sort();
+    Ok((files, has_exe))
+}
+
+/// Stáhne nejnovější balíček a zkusí ho rozbalit — bez výměny souborů.
+///
+/// Dělá přesně to, co instalátor (systémový `tar`, staging složka), ale nic
+/// nepřepisuje a aplikaci neukončuje. Tím se dá ověřit, že balíček jde rozbalit,
+/// aniž by člověk přišel o instalaci, a je to jediný způsob, jak tuhle cestu
+/// otestovat před vydáním.
+pub fn self_test_update() -> Result<()> {
+    let info = fetch_latest_release()?.ok_or_else(|| anyhow!("GitHub nevrátil žádné vydání"))?;
+    info!(
+        "test aktualizace: nejnovější vydání {} (nainstalováno {})",
+        info.version, CURRENT_VERSION
+    );
+    let url = info
+        .asset_url
+        .clone()
+        .ok_or_else(|| anyhow!("vydání {} nemá balíček pro tento systém", info.version))?;
+    info!("test aktualizace: stahuji {url}");
+    let archive = download(&url)?;
+    let size = std::fs::metadata(&archive)?.len();
+    info!("test aktualizace: {} bajtů v {}", size, archive.display());
+
+    let staging = std::env::temp_dir().join("warust-selftest");
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging)?;
+
+    #[cfg(windows)]
+    let tar = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_default())
+        .join("System32")
+        .join("tar.exe");
+    #[cfg(not(windows))]
+    let tar = std::path::PathBuf::from("tar");
+
+    let output = std::process::Command::new(&tar)
+        .arg("-x")
+        .arg("-f")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&staging)
+        .output()?;
+    info!(
+        "test aktualizace: {} skončil {:?}",
+        tar.display(),
+        output.status.code()
+    );
+    if !output.stderr.is_empty() {
+        warn!(
+            "test aktualizace: stderr: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let (files, has_exe) = inspect_staging(&staging)?;
+    for (name, bytes) in &files {
+        info!("test aktualizace: rozbaleno {name} ({bytes} B)");
+    }
+    let _ = std::fs::remove_dir_all(&staging);
+    let _ = std::fs::remove_file(&archive);
+
+    if !has_exe {
+        return Err(anyhow!(
+            "v rozbaleném balíčku není spustitelný warust.exe (soubory: {:?})",
+            files.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>()
+        ));
+    }
+    info!(
+        "test aktualizace: OK — {} souborů, warust.exe je spustitelný",
+        files.len()
+    );
+    Ok(())
+}
+
 pub fn install_and_restart(archive: &Path) -> Result<()> {
     let exe = std::env::current_exe()?;
     let dir = exe
@@ -463,6 +570,25 @@ mod tests {
         let info = parse_release(&json, "windows-x86_64.zip").expect("release parses");
         assert!(info.asset_url.is_none());
         assert!(!info.has_asset());
+    }
+
+    /// Balíček je rozbalený správně jen když v něm leží spustitelný soubor.
+    /// Samotný název nestačí: prázdný nebo zkomolený soubor se stejným jménem
+    /// vypadá jako úspěch a aplikace se pak neaktualizuje.
+    #[test]
+    fn staging_needs_an_executable_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ffmpeg.exe"), b"MZ ffmpeg").unwrap();
+        let (files, ok) = inspect_staging(dir.path()).unwrap();
+        assert!(!ok, "soubory: {files:?}");
+
+        std::fs::write(dir.path().join("warust.exe"), b"MZ warust").unwrap();
+        let (files, ok) = inspect_staging(dir.path()).unwrap();
+        assert!(ok);
+        assert!(files.iter().any(|(name, _)| name == "warust.exe"));
+
+        std::fs::write(dir.path().join("warust.exe"), b"").unwrap();
+        assert!(!inspect_staging(dir.path()).unwrap().1);
     }
 
     #[test]

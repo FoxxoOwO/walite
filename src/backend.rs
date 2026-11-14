@@ -270,7 +270,7 @@ async fn auto_fetch_initial_messages(client: &Arc<Client>, state: &SharedState, 
         s.initial_history_fetched = true;
         s.consolidate_canonical_chats();
     }
-    let _ = crate::storage::persist_state(state).await;
+    crate::storage::persist_or_log(state).await;
 
     FETCHING_INITIAL_HISTORY.store(false, Ordering::SeqCst);
     info!("Completed auto-fetching initial 20 messages for conversations");
@@ -413,7 +413,7 @@ async fn create_and_spawn_bot(
                             }
                             s.consolidate_canonical_chats();
                         }
-                        let _ = crate::storage::persist_state(&state_clone2).await;
+                        crate::storage::persist_or_log(&state_clone2).await;
                     }
 
                     // Automatically load the first 20 messages from each conversation on first login
@@ -576,7 +576,7 @@ pub async fn spawn_backend(state: SharedState) -> Result<BackendHandle> {
 
             s.consolidate_canonical_chats();
         }
-        let _ = crate::storage::persist_state(&state).await;
+        crate::storage::persist_or_log(&state).await;
     }
 
     let call_manager = Arc::new(CallManager {
@@ -828,7 +828,7 @@ async fn apply_poll_vote(
             s.dirty = true;
         }
     }
-    let _ = crate::storage::persist_state(&state).await;
+    crate::storage::persist_or_log(&state).await;
 }
 
 async fn handle_incoming_message(
@@ -857,7 +857,7 @@ async fn handle_incoming_message(
                 s.apply_reaction(&canon_chat_jid, target_id, &sender_jid, emoji);
                 s.consolidate_canonical_chats();
             }
-            let _ = crate::storage::persist_state(&state).await;
+            crate::storage::persist_or_log(&state).await;
         }
 
         if !from_me {
@@ -906,7 +906,7 @@ async fn handle_incoming_message(
             "Edit for message {} in {} (applied={})",
             target_id, canon_chat_jid, applied
         );
-        let _ = crate::storage::persist_state(&state).await;
+        crate::storage::persist_or_log(&state).await;
         return;
     }
 
@@ -974,7 +974,7 @@ async fn handle_incoming_message(
             }
             s.dirty = true;
         }
-        let _ = crate::storage::persist_state(&state).await;
+        crate::storage::persist_or_log(&state).await;
         return;
     }
 
@@ -1775,7 +1775,7 @@ async fn handle_event(
                     }
                     s.consolidate_canonical_chats();
                 }
-                let _ = crate::storage::persist_state(&state).await;
+                crate::storage::persist_or_log(&state).await;
             }
             
             // Mark connected immediately if 100%, or set up auto-settle debounce
@@ -1937,7 +1937,7 @@ async fn handle_event(
                 }
             };
             if should_persist {
-                let _ = crate::storage::persist_state(&state).await;
+                crate::storage::persist_or_log(&state).await;
             }
         }
         
@@ -1978,7 +1978,7 @@ async fn handle_event(
                 }
             };
             if should_persist {
-                let _ = crate::storage::persist_state(&state).await;
+                crate::storage::persist_or_log(&state).await;
             }
         }
         
@@ -2235,7 +2235,7 @@ fn spawn_media_download(
                         s.dirty = true;
                     }
                     crate::media::MEDIA_REV.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let _ = crate::storage::persist_state(&state).await;
+                    crate::storage::persist_or_log(&state).await;
                 }
             }
             Err(e) => tracing::error!("Failed to download media for {}: {}", message_id, e),
@@ -2302,7 +2302,7 @@ async fn handle_command(
                 s.add_message(message);
                 s.consolidate_canonical_chats();
             }
-            let _ = crate::storage::persist_state(state).await;
+            crate::storage::persist_or_log(state).await;
         }
         
         Command::SendContact { chat_jid, contact_jid, reply_to } => {
@@ -2363,7 +2363,7 @@ async fn handle_command(
                 s.add_message(message);
                 s.consolidate_canonical_chats();
             }
-            let _ = crate::storage::persist_state(state).await;
+            crate::storage::persist_or_log(state).await;
         }
 
         Command::SendMessage { to, message } => {
@@ -2549,7 +2549,7 @@ async fn handle_command(
                                             s.consolidate_canonical_chats();
                                         }
                                         crate::media::MEDIA_REV.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                        let _ = crate::storage::persist_state(&state_clone).await;
+                                        crate::storage::persist_or_log(&state_clone).await;
                                     }
                                     Err(e) => {
                                         tracing::error!("Failed to send media message: {}", e);
@@ -2623,7 +2623,7 @@ async fn handle_command(
                         let mut s = state_clone.write();
                         s.consolidate_canonical_chats();
                     }
-                    let _ = crate::storage::persist_state(&state_clone).await;
+                    crate::storage::persist_or_log(&state_clone).await;
                 });
             }
         }
@@ -2662,7 +2662,7 @@ async fn handle_command(
                 s.dirty = true;
             }
             crate::media::MEDIA_REV.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let _ = crate::storage::persist_state(state).await;
+            crate::storage::persist_or_log(state).await;
         }
 
         Command::SendReaction { chat_jid, message_id, emoji } => {
@@ -2694,7 +2694,7 @@ async fn handle_command(
                 s.apply_reaction(&canon_chat, &message_id, &self_jid, &emoji);
                 s.consolidate_canonical_chats();
             }
-            let _ = crate::storage::persist_state(&state).await;
+            crate::storage::persist_or_log(&state).await;
 
             // 2. Dispatch reaction to WhatsApp server
             let client = client.clone();
@@ -3029,7 +3029,7 @@ async fn handle_command(
                 let mut s = state.write();
                 s.scheduled_messages.push(msg);
             }
-            let _ = crate::storage::persist_state(state).await;
+            crate::storage::persist_or_log(state).await;
         }
 
         Command::CancelScheduledMessage { id } => {
@@ -3039,7 +3039,7 @@ async fn handle_command(
                     msg.status = crate::state::ScheduledStatus::Cancelled;
                 }
             }
-            let _ = crate::storage::persist_state(state).await;
+            crate::storage::persist_or_log(state).await;
         }
 
         Command::SendScheduledMessageNow { id } => {
@@ -3069,7 +3069,7 @@ async fn handle_command(
                     );
                     state.write().add_message(sent_msg);
                 }
-                let _ = crate::storage::persist_state(state).await;
+                crate::storage::persist_or_log(state).await;
             }
         }
 
@@ -3334,7 +3334,7 @@ async fn handle_command(
                     }
                 }
             }
-            let _ = crate::storage::persist_state(state).await;
+            crate::storage::persist_or_log(state).await;
 
             let pn_jid = {
                 let s = state.read();
@@ -3402,7 +3402,7 @@ async fn handle_command(
                 s.selected_messages.clear();
                 s.dirty = true;
             }
-            let _ = crate::storage::persist_state(&state).await;
+            crate::storage::persist_or_log(&state).await;
         }
         
         Command::JoinGroup { invite_code } => {
@@ -3425,7 +3425,7 @@ async fn handle_command(
                 s.dirty = true;
             }
             refresh_group_info(&client, state, &group_jid).await;
-            let _ = crate::storage::persist_state(state).await;
+            crate::storage::persist_or_log(state).await;
         }
 
         Command::SendVoiceNote { chat_jid, file_path, duration_seconds, waveform } => {
@@ -3498,7 +3498,7 @@ async fn handle_command(
                             s.consolidate_canonical_chats();
                         }
                         crate::media::MEDIA_REV.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let _ = crate::storage::persist_state(&state_clone).await;
+                        crate::storage::persist_or_log(&state_clone).await;
                     }
                     Err(err) => tracing::error!("Failed to send voice note: {err}"),
                 }
@@ -3543,7 +3543,7 @@ async fn handle_command(
                         s.add_message(local_msg);
                         s.consolidate_canonical_chats();
                     }
-                    let _ = crate::storage::persist_state(&state).await;
+                    crate::storage::persist_or_log(&state).await;
                 }
                 Err(err) => error!("Failed to create poll: {err}"),
             }
@@ -3877,7 +3877,9 @@ async fn handle_command(
                 let new_session_name = format!("whatsapp_{}.db", Utc::now().timestamp_millis());
                 let new_db_path = data_dir.join(&new_session_name);
                 let new_db_path_str = new_db_path.to_string_lossy().to_string();
-                let _ = std::fs::write(data_dir.join("current_session.txt"), &new_session_name);
+                if let Err(err) = std::fs::write(data_dir.join("current_session.txt"), &new_session_name) {
+                    tracing::warn!("nepodařilo se zapsat current_session.txt: {err}");
+                }
                 *active_db_path.write().await = new_db_path_str.clone();
 
                 // 5. Delete cached UI state

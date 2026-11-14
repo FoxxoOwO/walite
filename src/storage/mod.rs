@@ -436,6 +436,17 @@ pub async fn persist_state(state: &SharedState) -> Result<()> {
     Store::default_location().persist(state, false).await
 }
 
+/// Persist the state, and say so in the log when the write fails.
+///
+/// Every call site used to discard the result. A rejected write is silent data
+/// loss: the user sends a message, the disk is full, and after a restart the
+/// message is gone with nothing in the log to explain it.
+pub async fn persist_or_log(state: &SharedState) {
+    if let Err(err) = persist_state(state).await {
+        tracing::error!("uložení stavu selhalo: {err}");
+    }
+}
+
 /// Persist only when content actually changed since the last successful write.
 pub async fn persist_if_dirty(state: &SharedState) -> Result<()> {
     Store::default_location().persist(state, true).await

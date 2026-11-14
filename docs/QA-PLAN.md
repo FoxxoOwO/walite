@@ -147,7 +147,7 @@ Závažnost:
 ## 8. Známé mezery a co s nimi
 
 - **Aplikace nepíše log do souboru**, jen na stdout. U odpojeného okna není co
-  přiložit — stálo by za to přidat `%LOCALAPPDATA%\warust\warust.log` s rotací.
+  přiložit — stálo by za to přidat `%APPDATA%\warust\warust.log` s rotací.
   Do té doby se QA log sbírá spuštěním z terminálu.
 - **Žádné automatické UI testy** (klikání, screenshoty). Nejblíž je headless
   harfa v sekci 2; ta měří rozvržení, ne interakce.

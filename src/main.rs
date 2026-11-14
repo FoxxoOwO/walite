@@ -15,6 +15,7 @@ mod clipboard;
 mod commands;
 pub mod export;
 mod avatars;
+pub mod logging;
 pub mod media;
 pub mod search;
 mod state;
@@ -27,20 +28,11 @@ mod util;
 mod vcard;
 
 use anyhow::Result;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 fn main() -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::from_default_env()
-            .add_directive("warust=debug".parse()?)
-            .add_directive("whatsapp_rust=info".parse()?))
-        .with(tracing_subscriber::fmt::layer()
-            .with_target(false)
-            .with_thread_ids(true)
-            .with_file(true)
-            .with_line_number(true))
-        .init();
+    // Logging goes to stdout and to a file next to the app data, so a bug can be
+    // reported from a window that was never attached to a console.
+    logging::init();
 
     tracing::info!("Starting Warust v{}", env!("CARGO_PKG_VERSION"));
 
@@ -56,6 +48,22 @@ fn main() -> Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(1500));
         return Ok(());
     }
+    // Diagnostic: download and unpack the latest release without installing it,
+    // so the installer path can be checked on a machine that has no newer version
+    // to install.
+    if std::env::args().any(|a| a == "--test-update") {
+        match crate::updater::self_test_update() {
+            Ok(()) => {
+                tracing::info!("test aktualizace prošel");
+                return Ok(());
+            }
+            Err(err) => {
+                tracing::error!("test aktualizace selhal: {err:#}");
+                return Err(err);
+            }
+        }
+    }
+
     // Resolve ffmpeg once up front so the log states which binary will be used
     // (bundled next to the exe, or found on PATH) before any media is played.
     crate::audio::ffmpeg_available();
