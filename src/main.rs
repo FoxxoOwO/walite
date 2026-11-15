@@ -27,8 +27,23 @@ mod updater;
 mod i18n;
 mod util;
 mod vcard;
+mod ws_bridge;
 
 use anyhow::Result;
+
+fn ui_mode_is_ws() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    args.windows(2).any(|w| w[0] == "--ui" && w[1] == "ws")
+}
+
+fn bridge_port() -> u16 {
+    let args: Vec<String> = std::env::args().collect();
+    args.iter()
+        .position(|a| a == "--port")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8787)
+}
 
 fn main() -> Result<()> {
     // Logging goes to stdout and to a file next to the app data, so a bug can be
@@ -63,6 +78,15 @@ fn main() -> Result<()> {
                 return Err(err);
             }
         }
+    }
+
+    // Headless mode: serve the JSON-over-WebSocket API the Flutter UI speaks
+    // instead of opening the egui window.
+    if ui_mode_is_ws() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        return runtime.block_on(crate::ws_bridge::run(bridge_port()));
     }
 
     // Resolve ffmpeg once up front so the log states which binary will be used
