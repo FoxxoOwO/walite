@@ -365,7 +365,7 @@ class Bridge {
         'type': 'send',
         'chat': jid,
         'text': text,
-        if (reply != null) 'reply': reply,
+        'reply': ?reply,
       });
 
   void search(String query) => _send({'type': 'search', 'q': query});
@@ -396,7 +396,7 @@ class Bridge {
         'chat': chat,
         'path': path,
         if (caption != null && caption.isNotEmpty) 'caption': caption,
-        if (replyTo != null) 'reply_to': replyTo,
+        'reply_to': ?replyTo,
         if (viewOnce) 'view_once': true,
       });
 
@@ -419,7 +419,7 @@ class Bridge {
         'type': 'pin_message',
         'chat': chat,
         'id': id,
-        if (seconds != null) 'duration': seconds,
+        'duration': ?seconds,
       });
 
   void openViewOnce(String chat, String id) =>
@@ -433,7 +433,7 @@ class Bridge {
   void muteChat(String chat, {int? hours}) => _send({
         'type': 'mute_chat',
         'chat': chat,
-        if (hours != null) 'hours': hours,
+        'hours': ?hours,
       });
 
   void unmuteChat(String chat) => _send({'type': 'unmute_chat', 'chat': chat});
@@ -474,7 +474,7 @@ class Bridge {
         'type': 'export_chat',
         'chat': chat,
         'format': format,
-        if (dir != null) 'dir': dir,
+        'dir': ?dir,
       });
 
   // Group actions. Display names for the JIDs come from [Snapshot.contacts].
