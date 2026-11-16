@@ -1,7 +1,5 @@
 import 'dart:async';
 
-import 'dart:async';
-
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -62,9 +60,6 @@ class _HomePageState extends State<HomePage> {
   Msg? _reply;
 
   /// The bridge owns the microphone; the GUI only runs the clock.
-  bool _recording = false;
-  int _recSecs = 0;
-  Timer? _tick;
   bool _recording = false;
   int _recSecs = 0;
   Timer? _tick;
@@ -211,33 +206,6 @@ class _HomePageState extends State<HomePage> {
       return;
     }
     if (chat == null) return;
-    _bridge.recordStart();
-    _tick = Timer.periodic(
-        const Duration(seconds: 1), (_) => setState(() => _recSecs++));
-    setState(() {
-      _recording = true;
-      _recSecs = 0;
-    });
-  }
-
-  void _recordCancel() {
-    _tick?.cancel();
-    _bridge.recordCancel();
-    setState(() => _recording = false);
-  }
-
-  String get _elapsed =>
-      '${_recSecs ~/ 60}:${(_recSecs % 60).toString().padLeft(2, '0')}';
-
-  void _recordToggle() {
-    if (_recording) {
-      _tick?.cancel();
-      setState(() => _recording = false);
-      final chat = _snapshot?.selected;
-      if (chat != null) _bridge.recordStop(chat);
-      return;
-    }
-    if (_snapshot?.selected == null) return;
     _bridge.recordStart();
     _tick = Timer.periodic(
         const Duration(seconds: 1), (_) => setState(() => _recSecs++));
