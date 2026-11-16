@@ -152,6 +152,37 @@ void main() {
     expect(Snapshot.fromJson({}).scheduled, isEmpty);
   });
 
+  test('decodes a poll with its tallies and own vote', () {
+    final snapshot = Snapshot.fromJson({
+      'messages': [
+        {
+          'id': 'P1',
+          'text': '',
+          'poll': {
+            'question': 'Kam na oběd?',
+            'options': ['Sushi', 'Kebab'],
+            'selectable': 1,
+            'voters': 3,
+            'mine': ['Kebab'],
+            'tallies': [
+              {'option': 'Sushi', 'votes': 1},
+              {'option': 'Kebab', 'votes': 2},
+            ],
+          },
+        },
+      ],
+    });
+
+    final poll = snapshot.messages.single.poll!;
+    expect(poll.question, 'Kam na oběd?');
+    expect(poll.options, ['Sushi', 'Kebab']);
+    expect(poll.selectable, 1);
+    expect(poll.voters, 3);
+    expect(poll.mine, ['Kebab']);
+    expect(poll.tallies, {'Sushi': 1, 'Kebab': 2});
+    expect(Snapshot.fromJson({}).messages, isEmpty);
+  });
+
   test('missing fields fall back instead of throwing', () {
     final snapshot = Snapshot.fromJson({});
     expect(snapshot.connection, 'disconnected');

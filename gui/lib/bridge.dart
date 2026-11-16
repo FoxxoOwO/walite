@@ -66,6 +66,7 @@ class Msg {
     this.replyTo,
     this.edited = false,
     this.viewOnce = false,
+    this.poll,
     this.reactions = const [],
   });
 
@@ -80,6 +81,9 @@ class Msg {
   final String? replyTo;
   final bool edited;
   final bool viewOnce;
+
+  /// Present when the message is a poll, from either side.
+  final Poll? poll;
 
   /// Emoji only; the same emoji from several people appears once.
   final List<String> reactions;
@@ -96,11 +100,60 @@ class Msg {
         replyTo: json['reply_to'] as String?,
         edited: json['edited'] as bool? ?? false,
         viewOnce: json['view_once'] as bool? ?? false,
+        poll: json['poll'] == null
+            ? null
+            : Poll.fromJson(json['poll'] as Map<String, dynamic>),
         reactions: ((json['reactions'] as List<dynamic>? ?? const [])
                 .map((e) => (e as Map<String, dynamic>)['emoji'] as String?)
                 .whereType<String>())
             .toSet()
             .toList(),
+      );
+}
+
+/// A poll attached to a message. Vote counts are already tallies, so the GUI
+/// never sees who voted for what.
+class Poll {
+  Poll({
+    required this.question,
+    this.options = const [],
+    this.selectable = 1,
+    this.quiz = false,
+    this.voters = 0,
+    this.mine = const [],
+    this.tallies = const {},
+  });
+
+  final String question;
+  final List<String> options;
+
+  /// `1` = single choice, `2`+ = up to N, `0` = unlimited.
+  final int selectable;
+  final bool quiz;
+  final int voters;
+
+  /// Option names this account already picked.
+  final List<String> mine;
+
+  /// Option name → vote count, in the poll's own option order.
+  final Map<String, int> tallies;
+
+  factory Poll.fromJson(Map<String, dynamic> json) => Poll(
+        question: json['question'] as String? ?? '',
+        options: ((json['options'] as List<dynamic>? ?? const [])
+            .whereType<String>()
+            .toList()),
+        selectable: json['selectable'] as int? ?? 1,
+        quiz: json['quiz'] as bool? ?? false,
+        voters: json['voters'] as int? ?? 0,
+        mine: ((json['mine'] as List<dynamic>? ?? const [])
+            .whereType<String>()
+            .toList()),
+        tallies: {
+          for (final t in (json['tallies'] as List<dynamic>? ?? const []))
+            (t as Map<String, dynamic>)['option'] as String:
+                t['votes'] as int? ?? 0,
+        },
       );
 }
 
@@ -394,6 +447,25 @@ class Bridge {
   void clearChat(String chat) => _send({'type': 'clear_chat', 'chat': chat});
 
   void deleteChat(String chat) => _send({'type': 'delete_chat', 'chat': chat});
+
+  /// At least two non-empty [options]; the backend drops the command otherwise.
+  void createPoll(String chat, String question, List<String> options,
+          {int selectable = 1}) =>
+      _send({
+        'type': 'create_poll',
+        'chat': chat,
+        'question': question,
+        'options': options,
+        'selectable': selectable,
+      });
+
+  /// [options] is the whole selection, replacing any earlier vote.
+  void votePoll(String chat, String messageId, List<String> options) => _send({
+        'type': 'vote_poll',
+        'chat': chat,
+        'id': messageId,
+        'options': options,
+      });
 
   /// [format] is `txt`, `json` or `html`. The backend names the file
   /// (`<chat>_<timestamp>.<ext>`) inside [dir], or its default export folder

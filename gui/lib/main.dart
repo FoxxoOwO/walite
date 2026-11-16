@@ -459,6 +459,11 @@ class _HomePageState extends State<HomePage> {
                     icon: const Icon(Icons.attach_file),
                     tooltip: 'Přiložit soubor',
                   ),
+                  IconButton(
+                    onPressed: _newPoll,
+                    icon: const Icon(Icons.poll_outlined),
+                    tooltip: 'Vytvořit anketu',
+                  ),
                   if (_recording) ...[
                     const Icon(Icons.fiber_manual_record,
                         color: Colors.red, size: 14),
@@ -781,6 +786,7 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
               if (msg.text.isNotEmpty) Text(msg.text),
+              if (msg.poll != null) _poll(msg),
               if (msg.media != null) _mediaRow(chat, msg),
               if (msg.caption != null && msg.caption!.isNotEmpty)
                 Text(msg.caption!),
@@ -954,6 +960,182 @@ class _HomePageState extends State<HomePage> {
       ),
     );
     return ok ?? false;
+  }
+
+  /// Blank option rows are ignored by the backend, so extra empty fields are
+  /// harmless; fewer than two filled ones is refused here to avoid a silent
+  /// no-op on the bridge.
+  Future<void> _newPoll() async {
+    final chat = _snapshot?.selected;
+    if (chat == null) return;
+    final question = TextEditingController();
+    final options = [TextEditingController(), TextEditingController()];
+    var multi = false;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialog) => StatefulBuilder(
+        builder: (dialog, setState) => AlertDialog(
+          title: const Text('Nová anketa'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: question,
+                  autofocus: true,
+                  decoration: const InputDecoration(labelText: 'Otázka'),
+                ),
+                for (final option in options)
+                  TextField(
+                    controller: option,
+                    decoration: const InputDecoration(labelText: 'Volba'),
+                  ),
+                TextButton.icon(
+                  onPressed: () =>
+                      setState(() => options.add(TextEditingController())),
+                  icon: const Icon(Icons.add),
+                  label: const Text('Přidat volbu'),
+                ),
+                CheckboxListTile(
+                  value: multi,
+                  onChanged: (v) => setState(() => multi = v ?? false),
+                  title: const Text('Více odpovědí'),
+                  controlAffinity: ListTileControlAffinity.leading,
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialog, false),
+              child: const Text('Zrušit'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialog, true),
+              child: const Text('Vytvořit'),
+            ),
+          ],
+        ),
+      ),
+    );
+    final text = question.text.trim();
+    final choices = options
+        .map((c) => c.text.trim())
+        .where((t) => t.isNotEmpty)
+        .toList();
+    for (final c in options) {
+      c.dispose();
+    }
+    question.dispose();
+    if (ok != true) return;
+    if (text.isEmpty || choices.length < 2) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Anketa potřebuje otázku a aspoň dvě volby.')));
+      }
+      return;
+    }
+    _bridge.createPoll(chat, text, choices, selectable: multi ? 0 : 1);
+  }
+
+  Widget _poll(Msg msg) {
+    final poll = msg.poll!;
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(top: 4),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.black26,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(poll.question,
+              style: const TextStyle(fontWeight: FontWeight.bold)),
+          for (final option in poll.options)
+            InkWell(
+              onTap: () => _vote(msg),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(
+                  children: [
+                    Icon(
+                      poll.mine.contains(option)
+                          ? Icons.radio_button_checked
+                          : Icons.radio_button_off,
+                      size: 14,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(child: Text(option)),
+                    Text('${poll.tallies[option] ?? 0}'),
+                  ],
+                ),
+              ),
+            ),
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Text('${poll.voters} hlasujících',
+                style: const TextStyle(fontSize: 10, color: Colors.white54)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// One dialog for both kinds: a single choice poll replaces the selection, a
+  /// multi choice one toggles up to `selectable` options (0 = unlimited).
+  Future<void> _vote(Msg msg) async {
+    final chat = _snapshot?.selected;
+    final poll = msg.poll;
+    if (chat == null || poll == null) return;
+    final picked = {...poll.mine};
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialog) => StatefulBuilder(
+        builder: (dialog, setState) => AlertDialog(
+          title: Text(poll.question),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final option in poll.options)
+                CheckboxListTile(
+                  value: picked.contains(option),
+                  onChanged: (v) => setState(() {
+                    if (poll.selectable == 1) {
+                      picked
+                        ..clear()
+                        ..add(option);
+                    } else if (v ?? false) {
+                      if (poll.selectable == 0 ||
+                          picked.length < poll.selectable) {
+                        picked.add(option);
+                      }
+                    } else {
+                      picked.remove(option);
+                    }
+                  }),
+                  title: Text(option),
+                  controlAffinity: ListTileControlAffinity.leading,
+                  contentPadding: EdgeInsets.zero,
+                ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialog, false),
+              child: const Text('Zrušit'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialog, true),
+              child: const Text('Hlasovat'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (ok == true) _bridge.votePoll(chat, msg.id, picked.toList());
   }
 
   /// The backend owns the filename (`<chat>_<timestamp>.<ext>`), so only a
