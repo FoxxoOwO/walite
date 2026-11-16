@@ -395,6 +395,16 @@ class Bridge {
 
   void deleteChat(String chat) => _send({'type': 'delete_chat', 'chat': chat});
 
+  /// [format] is `txt`, `json` or `html`. The backend names the file
+  /// (`<chat>_<timestamp>.<ext>`) inside [dir], or its default export folder
+  /// when [dir] is null.
+  void exportChat(String chat, String format, {String? dir}) => _send({
+        'type': 'export_chat',
+        'chat': chat,
+        'format': format,
+        if (dir != null) 'dir': dir,
+      });
+
   // Group actions. Display names for the JIDs come from [Snapshot.contacts].
   void requestGroupInfo(String chat) =>
       _send({'type': 'group_info', 'chat': chat});

@@ -956,6 +956,30 @@ class _HomePageState extends State<HomePage> {
     return ok ?? false;
   }
 
+  /// The backend owns the filename (`<chat>_<timestamp>.<ext>`), so only a
+  /// folder is picked and only the folder can be reported back.
+  Future<void> _exportChat(ChatItem chat) async {
+    final format = await showDialog<String>(
+      context: context,
+      builder: (dialog) => SimpleDialog(
+        title: const Text('Formát exportu'),
+        children: [
+          for (final f in const ['txt', 'json', 'html'])
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(dialog, f),
+              child: Text(f.toUpperCase()),
+            ),
+        ],
+      ),
+    );
+    if (format == null) return;
+    final dir = await getDirectoryPath(confirmButtonText: 'Exportovat sem');
+    _bridge.exportChat(chat.jid, format, dir: dir);
+    if (!mounted || dir == null) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text('Exportuji do $dir')));
+  }
+
   void _chatMenu(ChatItem chat) {
     showModalBottomSheet<void>(
       context: context,
@@ -1011,6 +1035,11 @@ class _HomePageState extends State<HomePage> {
                     _bridge.archiveChat(chat.jid);
                   }
                 }),
+              ),
+              ListTile(
+                leading: const Icon(Icons.file_download_outlined),
+                title: const Text('Exportovat chat…'),
+                onTap: () => act(() => _exportChat(chat)),
               ),
               ListTile(
                 leading: const Icon(Icons.cleaning_services),
