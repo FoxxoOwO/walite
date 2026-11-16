@@ -14,7 +14,7 @@ use tracing::{info, warn};
 use crate::state::SharedState;
 
 /// Repozitář, ze kterého se aktualizace stahují.
-pub const REPO: &str = "FoxxoOwO/warust";
+pub const REPO: &str = "FoxxoOwO/walite";
 /// Verze, se kterou je aplikace zkompilovaná.
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Jak často se aktualizace kontrolují na pozadí.

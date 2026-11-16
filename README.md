@@ -78,7 +78,7 @@ Existing session credentials, chat history, and cached media stored in `%APPDATA
 ## Getting Started
 
 ### Prebuilt Release (Windows)
-1. Download `WaLite-v1.0.0-windows-x86_64.zip` from the [Releases page](https://github.com/FoxxoOwO/warust/releases).
+1. Download `WaLite-v1.0.0-windows-x86_64.zip` from the [Releases page](https://github.com/FoxxoOwO/walite/releases).
 2. Extract all files into a folder (keep `warust_gui.exe`, `warust.exe`, `data/`, and the bundled `.dll` files together).
 3. Run `warust_gui.exe` — it launches the Rust backend automatically on `127.0.0.1:8787`.
 
@@ -92,8 +92,8 @@ Existing session credentials, chat history, and cached media stored in `%APPDATA
 #### Build Commands
 1. **Clone and test the Rust backend**:
    ```bash
-   git clone https://github.com/FoxxoOwO/warust.git
-   cd warust
+   git clone https://github.com/FoxxoOwO/walite.git
+   cd walite
    cargo test
    cargo build --release
    ```

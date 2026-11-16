@@ -3,7 +3,7 @@
 All notable changes to **WaLite** (formerly Warust) are recorded here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [semantic versioning](https://semver.org/). Release notes for every version
-are also published on the [Releases page](https://github.com/FoxxoOwO/warust/releases).
+are also published on the [Releases page](https://github.com/FoxxoOwO/walite/releases).
 
 ## [Unreleased]
 
