@@ -53,6 +53,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install Flutter (Windows GUI)
+        if: runner.os == 'Windows'
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -61,6 +67,11 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build Flutter Windows GUI
+        if: runner.os == 'Windows'
+        working-directory: gui
+        run: flutter build windows
 
       # --- ffmpeg -------------------------------------------------------------
       # Voice notes are Opus and video needs a decoder; there is no pure-Rust
@@ -138,9 +149,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
-          7z a "../../../warust-${VERSION}-${{ matrix.asset_suffix }}" \
-            ${{ matrix.artifact_name }} ffmpeg.exe ffprobe.exe FFMPEG-NOTICE.txt
+          dest="target/${{ matrix.target }}/release"
+          gui_rel="gui/build/windows/x64/runner/Release"
+          cp "$dest/${{ matrix.artifact_name }}" "$dest/ffmpeg.exe" "$dest/ffprobe.exe" "$dest/FFMPEG-NOTICE.txt" "$gui_rel/"
+          (cd "$gui_rel" && 7z a "../../../../../../warust-${VERSION}-${{ matrix.asset_suffix }}" .)
 
       - name: Package Unix artifact
         if: runner.os != 'Windows'

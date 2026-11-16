@@ -35,6 +35,61 @@ fn image_path(jid: &Jid) -> PathBuf {
     dir().join(format!("{}.jpg", key(jid)))
 }
 
+/// Current avatar cache revision; incremented whenever a new photo lands on disk.
+pub fn revision() -> u64 {
+    AVATAR_REV.load(Ordering::Relaxed)
+}
+
+/// Local path to a cached profile picture JPEG for `jid`, if present on disk.
+pub fn cached_path(jid: &Jid) -> Option<String> {
+    let path = image_path(jid);
+    path.is_file().then(|| path.to_string_lossy().into_owned())
+}
+
+/// Write a newly uploaded JPEG into the avatar cache and bump `AVATAR_REV`.
+pub fn save_cached_jpeg(jid: &Jid, jpeg_bytes: &[u8]) -> anyhow::Result<()> {
+    let _ = std::fs::create_dir_all(dir());
+    let img = image_path(jid);
+    let none = none_path(jid);
+    std::fs::write(&img, jpeg_bytes)?;
+    let _ = std::fs::remove_file(&none);
+    AVATAR_REV.fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Remove a cached profile picture for `jid` and mark it absent so it isn't re-fetched immediately.
+pub fn remove_cached(jid: &Jid) {
+    let _ = std::fs::create_dir_all(dir());
+    let _ = std::fs::remove_file(image_path(jid));
+    let _ = std::fs::write(none_path(jid), b"");
+    AVATAR_REV.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Load any supported image from `path`, center-crop to a square, resize to
+/// 640×640, and encode as RGB JPEG suitable for WhatsApp profile pictures.
+pub fn prepare_profile_jpeg(path: &std::path::Path) -> anyhow::Result<Vec<u8>> {
+    use anyhow::Context;
+    use image::codecs::jpeg::JpegEncoder;
+    use image::imageops::FilterType;
+
+    let raw = std::fs::read(path)
+        .with_context(|| format!("Nepodařilo se přečíst obrázek {}", path.display()))?;
+    let mut img = image::load_from_memory(&raw)
+        .context("Nepodporovaný nebo poškozený formát obrázku")?;
+    let (w, h) = (img.width(), img.height());
+    let side = w.min(h);
+    if w != h {
+        let x = (w - side) / 2;
+        let y = (h - side) / 2;
+        img = img.crop_imm(x, y, side, side);
+    }
+    let resized = img.resize_exact(640, 640, FilterType::Lanczos3).to_rgb8();
+    let mut out = Vec::new();
+    let mut enc = JpegEncoder::new_with_quality(&mut out, 90);
+    enc.encode_image(&resized)?;
+    Ok(out)
+}
+
 fn none_path(jid: &Jid) -> PathBuf {
     dir().join(format!("{}.none", key(jid)))
 }
@@ -75,6 +130,11 @@ pub async fn fetch_avatar(client: &Arc<Client>, jid: &Jid, force: bool) {
             }
         }
         Ok(None) => {
+            let had_img = img.exists();
+            if had_img {
+                let _ = std::fs::remove_file(&img);
+                AVATAR_REV.fetch_add(1, Ordering::Relaxed);
+            }
             let _ = std::fs::write(&none, b"");
         }
         Err(e) => tracing::debug!("Profile picture query failed for {}: {}", jid, e),
@@ -132,4 +192,27 @@ pub fn paint_circle(ui: &egui::Ui, tex: &egui::TextureHandle, rect: egui::Rect) 
     egui::Image::new(egui::load::SizedTexture::new(tex.id(), rect.size()))
         .corner_radius(rect.width() / 2.0)
         .paint_at(ui, rect);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepare_profile_jpeg_crops_and_resizes_to_640_square() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("wide.png");
+        let img = image::RgbImage::from_fn(200, 100, |x, _| {
+            if x < 50 || x >= 150 {
+                image::Rgb([0, 0, 0])
+            } else {
+                image::Rgb([37, 211, 102])
+            }
+        });
+        img.save(&src).unwrap();
+
+        let jpeg = prepare_profile_jpeg(&src).unwrap();
+        let decoded = image::load_from_memory(&jpeg).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (640, 640));
+    }
 }

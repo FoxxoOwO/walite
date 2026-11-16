@@ -45,6 +45,9 @@ pub enum SearchContentType {
     TextOnly,
     MediaOnly,
     LinksOnly,
+    PollsOnly,
+    WithReactionsOnly,
+    StarredOnly,
 }
 
 impl SearchContentType {
@@ -54,6 +57,9 @@ impl SearchContentType {
             Self::TextOnly => "💬 Text only",
             Self::MediaOnly => "📷 Media only",
             Self::LinksOnly => "🔗 Links only",
+            Self::PollsOnly => "📊 Polls only",
+            Self::WithReactionsOnly => "😀 With reactions",
+            Self::StarredOnly => "⭐ Starred only",
         }
     }
 }
@@ -164,7 +170,31 @@ pub fn search_messages(
                     }
                     SearchContentType::LinksOnly => {
                         let text_lower = msg.text.to_lowercase();
-                        if !text_lower.contains("http://") && !text_lower.contains("https://") {
+                        let caption_lower = msg
+                            .media_caption
+                            .as_deref()
+                            .map(|c| c.to_lowercase())
+                            .unwrap_or_default();
+                        if !text_lower.contains("http://")
+                            && !text_lower.contains("https://")
+                            && !caption_lower.contains("http://")
+                            && !caption_lower.contains("https://")
+                        {
+                            continue;
+                        }
+                    }
+                    SearchContentType::PollsOnly => {
+                        if msg.poll.is_none() {
+                            continue;
+                        }
+                    }
+                    SearchContentType::WithReactionsOnly => {
+                        if msg.reactions.is_empty() {
+                            continue;
+                        }
+                    }
+                    SearchContentType::StarredOnly => {
+                        if !msg.starred {
                             continue;
                         }
                     }
@@ -190,11 +220,25 @@ pub fn search_messages(
                     }
                 }
 
-                // Filter 4: Text Query match
+                // Filter 4: Text Query match (body, caption, filename, poll, or shared contacts)
                 if !query_lower.is_empty() {
                     let in_text = msg.text.to_lowercase().contains(&query_lower);
                     let in_caption = msg.media_caption.as_deref().map_or(false, |c| c.to_lowercase().contains(&query_lower));
-                    if !in_text && !in_caption {
+                    let in_filename = msg
+                        .media_path
+                        .as_deref()
+                        .and_then(|p| std::path::Path::new(p).file_name())
+                        .and_then(|n| n.to_str())
+                        .map_or(false, |n| n.to_lowercase().contains(&query_lower));
+                    let in_poll = msg.poll.as_ref().map_or(false, |p| {
+                        p.question.to_lowercase().contains(&query_lower)
+                            || p.options.iter().any(|o| o.to_lowercase().contains(&query_lower))
+                    });
+                    let in_contacts = msg.contacts.iter().any(|c| {
+                        c.name.to_lowercase().contains(&query_lower)
+                            || c.phone.to_lowercase().contains(&query_lower)
+                    });
+                    if !in_text && !in_caption && !in_filename && !in_poll && !in_contacts {
                         continue;
                     }
                 }
@@ -280,5 +324,80 @@ mod tests {
         let res = search_messages(&state, &filter);
         assert_eq!(res.len(), 1);
         assert_eq!(res[0].message.id, "2");
+    }
+
+    #[test]
+    fn test_search_filters_polls_reactions_and_starred() {
+        let mut state = AppState::new();
+        let chat_jid: Jid = "420737526533@s.whatsapp.net".parse().unwrap();
+        state.get_or_create_chat(chat_jid.clone(), "Eva".to_string(), false);
+
+        let mut poll_msg = Message::new_text(
+            "P1".to_string(),
+            chat_jid.clone(),
+            chat_jid.clone(),
+            "Kam na oběd?".to_string(),
+            Utc::now(),
+            false,
+            MessageStatus::Read,
+            None,
+            None,
+        );
+        poll_msg.poll = Some(crate::state::PollData {
+            question: "Kam na oběd?".to_string(),
+            options: vec!["Ramen".to_string(), "Pizza".to_string()],
+            selectable_count: 1,
+            ..Default::default()
+        });
+
+        let mut react_msg = Message::new_text(
+            "R1".to_string(),
+            chat_jid.clone(),
+            chat_jid.clone(),
+            "Super nápad!".to_string(),
+            Utc::now(),
+            false,
+            MessageStatus::Read,
+            None,
+            None,
+        );
+        react_msg.reactions.push(crate::state::Reaction {
+            emoji: "👍".to_string(),
+            sender: chat_jid.clone(),
+        });
+        react_msg.starred = true;
+
+        state.add_message(poll_msg);
+        state.add_message(react_msg);
+
+        let polls = search_messages(
+            &state,
+            &MessageSearchFilter {
+                content_type: SearchContentType::PollsOnly,
+                ..Default::default()
+            },
+        );
+        assert_eq!(polls.len(), 1);
+        assert_eq!(polls[0].message.id, "P1");
+
+        let reacted = search_messages(
+            &state,
+            &MessageSearchFilter {
+                content_type: SearchContentType::WithReactionsOnly,
+                ..Default::default()
+            },
+        );
+        assert_eq!(reacted.len(), 1);
+        assert_eq!(reacted[0].message.id, "R1");
+
+        let starred = search_messages(
+            &state,
+            &MessageSearchFilter {
+                content_type: SearchContentType::StarredOnly,
+                ..Default::default()
+            },
+        );
+        assert_eq!(starred.len(), 1);
+        assert_eq!(starred[0].message.id, "R1");
     }
 }

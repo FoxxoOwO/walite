@@ -30,6 +30,8 @@ struct PersistedAppState {
     contacts: Vec<Contact>,
     self_jid: Option<String>,
     self_name: Option<String>,
+    #[serde(default)]
+    self_status: Option<String>,
     lid_to_pn: HashMap<String, String>,
     #[serde(default)]
     scheduled_messages: Vec<crate::state::ScheduledMessage>,
@@ -143,6 +145,7 @@ impl Store {
                 contacts: s.contacts.values().cloned().collect(),
                 self_jid: s.self_jid.as_ref().map(|j| j.to_string()),
                 self_name: s.self_name.clone(),
+                self_status: s.self_status.clone(),
                 lid_to_pn: s
                     .lid_to_pn
                     .iter()
@@ -343,6 +346,7 @@ impl Store {
             state.self_jid = sj.parse::<Jid>().ok();
         }
         state.self_name = persisted.self_name;
+        state.self_status = persisted.self_status;
         state.scheduled_messages = persisted.scheduled_messages;
         state.initial_history_fetched = persisted.initial_history_fetched;
         state.pinned = persisted
@@ -625,6 +629,7 @@ mod tests {
             contacts: vec![],
             self_jid: None,
             self_name: None,
+            self_status: None,
             lid_to_pn: HashMap::new(),
             scheduled_messages: vec![],
             preferences: UserPreferences::default(),

@@ -238,6 +238,15 @@ pub struct Message {
     /// tombstone instead of the media.
     #[serde(default, skip_serializing_if = "is_false")]
     pub view_once_opened: bool,
+    /// User-starred ("Hvězdičkou") message flag.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub starred: bool,
+    /// True when a `video` message is a WhatsApp GIF (`gif_playback`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub gif_playback: bool,
+    /// Parsed vCard contacts when this message shares one or more contact cards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contacts: Vec<crate::vcard::ContactCard>,
 }
 
 impl Message {
@@ -277,6 +286,9 @@ impl Message {
             poll: None,
             view_once: false,
             view_once_opened: false,
+            starred: false,
+            gif_playback: false,
+            contacts: Vec::new(),
         }
     }
 }
@@ -404,6 +416,15 @@ pub struct UserPreferences {
     /// Jazyk rozhraní; čeština je výchozí i pro dřív uložené nastavení.
     #[serde(default)]
     pub language: crate::i18n::Language,
+    /// Vlastní barva pozadí konverzace (hex "#RRGGBB"), pokud není výchozí ze schématu.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_wallpaper_color: Option<String>,
+    /// Vlastní obrázek tapety pozadí konverzace (cesta na disku).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_wallpaper_path: Option<String>,
+    /// Zobrazovat jemný WhatsApp vzorek na pozadí konverzace.
+    #[serde(default = "default_true")]
+    pub chat_wallpaper_doodles: bool,
 }
 
 impl Default for UserPreferences {
@@ -425,6 +446,9 @@ impl Default for UserPreferences {
             check_updates: true,
             auto_install_updates: false,
             language: crate::i18n::Language::default(),
+            chat_wallpaper_color: None,
+            chat_wallpaper_path: None,
+            chat_wallpaper_doodles: true,
         }
     }
 }
@@ -650,6 +674,8 @@ pub struct AppState {
     pub contacts: HashMap<Jid, Contact>,
     pub self_jid: Option<Jid>,
     pub self_name: Option<String>,
+    #[serde(default)]
+    pub self_status: Option<String>,
     pub connection: ConnectionStatus,
     pub selected_chat: Option<Jid>,
     pub search_query: String,
@@ -828,6 +854,12 @@ pub struct AppState {
     /// Whether the archived section is expanded in the chat list.
     #[serde(skip)]
     pub show_archived: bool,
+    /// Chats currently running a background PDO full-history sync loop.
+    #[serde(skip)]
+    pub history_syncing_chats: HashSet<Jid>,
+    /// Chats whose older history on the primary phone returned no further batches.
+    #[serde(skip)]
+    pub history_exhausted_chats: HashSet<Jid>,
 }
 
 impl Default for AppState {
@@ -838,6 +870,7 @@ impl Default for AppState {
             contacts: HashMap::new(),
             self_jid: None,
             self_name: None,
+            self_status: None,
             connection: ConnectionStatus::default(),
             selected_chat: None,
             search_query: String::new(),
@@ -907,6 +940,8 @@ impl Default for AppState {
             jump_target: None,
             scroll_to_bottom_requested: false,
             show_archived: false,
+            history_syncing_chats: HashSet::new(),
+            history_exhausted_chats: HashSet::new(),
         }
     }
 }
@@ -1545,6 +1580,23 @@ impl AppState {
             });
         }
         false
+    }
+
+    pub fn set_message_starred(&mut self, chat_jid: &Jid, msg_id: &str, starred: bool) -> bool {
+        let canon_chat = self.canonical_jid(chat_jid);
+        let mut updated = false;
+        if let Some(msgs) = self.messages.get_mut(&canon_chat) {
+            if let Some(msg) = msgs.iter_mut().find(|m| m.id == msg_id) {
+                if msg.starred != starred {
+                    msg.starred = starred;
+                    updated = true;
+                }
+            }
+        }
+        if updated {
+            self.dirty = true;
+        }
+        updated
     }
 
     /// Tick or untick a message in the bulk-action selection.

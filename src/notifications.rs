@@ -9,10 +9,22 @@
 //! toasts about messages you are already looking at.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
+use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
+
+/// Broadcasts `Some(chat_jid)` (or `None`) when the user clicks a desktop toast.
+static ACTIVATIONS: LazyLock<broadcast::Sender<Option<String>>> = LazyLock::new(|| {
+    let (tx, _) = broadcast::channel(16);
+    tx
+});
+
+pub fn subscribe_activations() -> broadcast::Receiver<Option<String>> {
+    ACTIVATIONS.subscribe()
+}
 
 /// Set from the UI thread every frame.
 static WINDOW_FOCUSED: AtomicBool = AtomicBool::new(true);
@@ -65,6 +77,11 @@ fn allow_at(now: Instant) -> bool {
 ///
 /// Returns `true` when a notification was actually handed to the OS.
 pub fn notify(title: &str, body: &str, sound: bool) -> bool {
+    notify_for_chat(None, title, body, sound)
+}
+
+/// Show a toast tied to `chat_jid` so clicking it can focus and open that chat.
+pub fn notify_for_chat(chat_jid: Option<&str>, title: &str, body: &str, sound: bool) -> bool {
     if window_focused() {
         debug!("skipping notification, window is focused");
         return false;
@@ -78,32 +95,113 @@ pub fn notify(title: &str, body: &str, sound: bool) -> bool {
         play_sound();
     }
 
-    show_toast(title, body)
+    show_toast_for_chat(chat_jid, title, body)
+}
+
+/// Ensure the `Warust` AppUserModelID and icon exist under `HKCU\Software\Classes\AppUserModelId\Warust`
+/// so Windows 10/11 Action Center displays the app name and icon on native toasts.
+#[cfg(target_os = "windows")]
+fn windows_toast_icon() -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    use std::sync::OnceLock;
+
+    static CACHED: OnceLock<Option<String>> = OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            let data_dir = dirs::data_dir()?.join("warust");
+            let _ = std::fs::create_dir_all(&data_dir);
+            let icon_path = data_dir.join("icon.png");
+            let icon_bytes = include_bytes!("../assets/icon.png");
+            let needs_write = std::fs::metadata(&icon_path)
+                .map(|m| m.len() != icon_bytes.len() as u64)
+                .unwrap_or(true);
+            if needs_write {
+                let _ = std::fs::write(&icon_path, icon_bytes);
+            }
+            let icon_str = icon_path.to_string_lossy().to_string();
+            let reg_key = r"HKCU\Software\Classes\AppUserModelId\WaLite";
+            let _ = Command::new("reg")
+                .args(["add", reg_key, "/v", "DisplayName", "/t", "REG_SZ", "/d", "WaLite", "/f"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .status();
+            let _ = Command::new("reg")
+                .args(["add", reg_key, "/v", "IconUri", "/t", "REG_SZ", "/d", &icon_str, "/f"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .status();
+            Some(icon_str)
+        })
+        .clone()
 }
 
 /// Send a toast without any of the focus/rate-limit logic. Used by the
 /// "test notification" button in settings.
 pub fn show_toast(title: &str, body: &str) -> bool {
+    show_toast_for_chat(None, title, body)
+}
+
+fn spawn_activation_listener(handle: notify_rust::NotificationHandle, chat_jid: Option<String>) {
+    #[cfg(target_os = "windows")]
+    {
+        std::thread::spawn(move || {
+            let _ = handle.wait_for_response(|resp: &notify_rust::NotificationResponse| {
+                if matches!(
+                    resp,
+                    notify_rust::NotificationResponse::Default
+                        | notify_rust::NotificationResponse::Action(_)
+                ) {
+                    let _ = ACTIVATIONS.send(chat_jid);
+                }
+            });
+        });
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (handle, chat_jid);
+    }
+}
+
+fn show_toast_for_chat(chat_jid: Option<&str>, title: &str, body: &str) -> bool {
     let mut notification = notify_rust::Notification::new();
     notification
         .summary(title)
         .body(body)
-        .appname("Warust")
+        .appname("WaLite")
         .timeout(notify_rust::Timeout::Milliseconds(6000));
 
     #[cfg(target_os = "windows")]
-    notification.app_id("Warust");
+    {
+        if let Some(icon_path) = windows_toast_icon() {
+            notification.icon(&icon_path);
+        }
+        notification.app_id("WaLite");
+    }
 
+    let chat_owned = chat_jid.map(str::to_string);
     match notification.show() {
-        Ok(_) => {
+        Ok(handle) => {
             info!("notification shown: {}", title);
+            spawn_activation_listener(handle, chat_owned);
             true
         }
-        Err(e) => {
+        Err(first_err) => {
+            #[cfg(target_os = "windows")]
+            {
+                // Fallback to Windows PowerShell's built-in registered AUMID if custom AUMID fails.
+                notification.app_id(
+                    r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe",
+                );
+                if let Ok(handle) = notification.show() {
+                    info!("notification shown via PowerShell AUMID fallback: {}", title);
+                    spawn_activation_listener(handle, chat_owned);
+                    return true;
+                }
+            }
             if !FAILURE_REPORTED.swap(true, Ordering::Relaxed) {
                 warn!(
                     "desktop notifications unavailable ({}); sound will still play",
-                    e
+                    first_err
                 );
             }
             false

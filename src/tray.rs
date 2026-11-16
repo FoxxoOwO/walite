@@ -24,10 +24,10 @@ impl SystemTray {
         // name. LoadImageW only resolves numeric IDs when they are written as
         // "#<id>", otherwise it reports ERROR_RESOURCE_NAME_NOT_FOUND (1812).
         let icon = IconSource::Resource("#1");
-        let mut tray = TrayItem::new("Warust", icon)?;
+        let mut tray = TrayItem::new("WaLite", icon)?;
 
         let tx_show = tx.clone();
-        let _ = tray.add_menu_item(crate::tr!("Otevřít Warust"), move || {
+        let _ = tray.add_menu_item(crate::tr!("Otevřít WaLite"), move || {
             let _ = tx_show.send(TrayMessage::ShowWindow);
         });
 
@@ -35,7 +35,7 @@ impl SystemTray {
         let _ = tray.inner_mut().add_separator();
 
         let tx_quit = tx;
-        let _ = tray.add_menu_item(crate::tr!("Ukončit Warust"), move || {
+        let _ = tray.add_menu_item(crate::tr!("Ukončit WaLite"), move || {
             let _ = tx_quit.send(TrayMessage::QuitApp);
         });
 

@@ -1,6 +1,6 @@
 {
-    "name": "warust_gui",
-    "short_name": "warust_gui",
+    "name": "WaLite",
+    "short_name": "WaLite",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",

@@ -228,8 +228,8 @@ pub const ENGLISH: &[(&str, &str)] = &[
     ),
     // --- Ostatní ---
     ("Přehrávání", "Playback"),
-    ("Otevřít Warust", "Open Warust"),
-    ("Ukončit Warust", "Quit Warust"),
+    ("Otevřít WaLite", "Open WaLite"),
+    ("Ukončit WaLite", "Quit WaLite"),
     ("Skočit na nejnovější zprávy", "Jump to the newest messages"),
 ];
 

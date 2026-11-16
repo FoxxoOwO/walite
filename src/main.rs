@@ -59,7 +59,7 @@ fn main() -> Result<()> {
         // Exercise the real path, including the focus gate and rate limiter,
         // by pretending the window is in the background.
         crate::notifications::set_window_focused(false);
-        let ok = crate::notifications::notify("Warust", "Testovací oznámení funguje.", true);
+        let ok = crate::notifications::notify("WaLite", "Testovací oznámení funguje.", true);
         tracing::info!("test notification result: {ok}");
         std::thread::sleep(std::time::Duration::from_millis(1500));
         return Ok(());
@@ -100,7 +100,7 @@ fn main() -> Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
             .with_min_inner_size([800.0, 600.0])
-            .with_title("Warust")
+            .with_title("WaLite")
             .with_visible(!start_in_tray)
             .with_icon(load_icon()),
         renderer: eframe::Renderer::Wgpu,
@@ -111,7 +111,7 @@ fn main() -> Result<()> {
 
     // Use map_err to convert eframe::Error to anyhow::Error
     eframe::run_native(
-        "Warust",
+        "WaLite",
         native_options,
         Box::new(|cc| Ok(Box::new(app::WarustApp::new(cc)?))),
     ).map_err(|e| anyhow::anyhow!(e.to_string()))?;

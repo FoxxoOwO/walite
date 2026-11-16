@@ -1,11 +1,68 @@
 # Changelog
 
-All notable changes to Warust are recorded here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
-[semantic versioning](https://semver.org/). Release notes for every version are
-also published on the [Releases page](https://github.com/FoxxoOwO/warust/releases).
+All notable changes to **WaLite** (formerly Warust) are recorded here. The format
+follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
+uses [semantic versioning](https://semver.org/). Release notes for every version
+are also published on the [Releases page](https://github.com/FoxxoOwO/warust/releases).
 
 ## [Unreleased]
+
+## [1.0.0] - 2026-11-16
+
+First **1.0.0** release under the **WaLite** brand, featuring the Flutter desktop
+front end backed by the Rust `whatsapp-rust` engine over a local WebSocket
+bridge, deep Windows shell integration, inline video/GIF playback, and full
+day-to-day WhatsApp desktop workflows.
+
+### Added
+- **Flutter Desktop Front End & WebSocket Bridge (`ws_bridge`)**: Full
+  three-column WhatsApp layout (`WaNavRail`, `ChatListPanel`,
+  `ConversationView`, `ChatInfoPanel`), command palette (`Ctrl+K`), poll
+  creation & voting, scheduled messages, multi-format export (`TXT`/`JSON`/`HTML`),
+  voice recording/playback, clipboard image paste (`Ctrl+V`), and CS/EN localization.
+- **Single-Process Windows Launcher (`warust_gui.exe`)**: Automatically spawns
+  the headless Rust backend (`warust.exe --ui ws`) without a console window,
+  binds it to a Windows Job Object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) to
+  prevent orphan processes, and supports `--tray` / `--minimized` startup flags.
+- **Interactive Windows Toast Notifications & Badges**: Clicking a message or
+  incoming-call toast brings WaLite out of the system tray and opens the target
+  chat directly; taskbar (`ITaskbarList3`) and tray icons display live unread
+  count badges.
+- **Profile Photo & "About" Status Editing**: Edit push name, *About / Status*
+  text (`maxLength: 139`), and upload/remove your profile picture (auto center-cropped
+  and resized to `640×640` JPEG) from *Settings → Account & profile*, synced on
+  connect and via live `UserAboutUpdate` events.
+- **Drag & Drop Attachments**: Native Win32 `WM_DROPFILES` support lets users
+  drop one or multiple files directly into a conversation with preview and
+  caption support.
+- **Starred Messages**: Star or unstar messages from the bubble context menu,
+  view starred indicators on bubbles, inspect chat-level starred messages in
+  `ChatInfoPanel`, or browse all starred messages via the navigation rail.
+- **Built-in Video & MP4-GIF Playback**: Powered by `media_kit` (`libmpv`),
+  with an in-app `VideoLightboxDialog` and silent looping playback (`PlaylistMode.single`)
+  for WhatsApp MP4-GIF messages.
+- **Search Match Highlighting & Extended Filters**: Added *Polls*, *With reactions*,
+  and *Starred* search filters plus query matching inside polls/contacts and
+  case-insensitive text match highlighting after jumping to a search hit.
+- **Interactive vCard Contact Cards**: Parsed `ContactMessage` and
+  `ContactsArrayMessage` payloads render as contact cards with *Message*
+  (`Start chat`) and *Copy number* buttons.
+- **Custom Chat Wallpapers**: Added per-app dark background color presets, custom
+  wallpaper image selection, and an optional doodle-pattern toggle in *Settings → Appearance*.
+
+### Changed
+- Rebranded application UI, Windows runner metadata, system tray tooltips/menus,
+  autostart registry entry (`WaLite`), Web manifest, and desktop notification
+  AUMID to **WaLite** while preserving existing `%APPDATA%\warust` data.
+- Updated autostart integration (`autostart.rs`) to target `warust_gui.exe --tray`.
+
+### Fixed
+- Enabled `/utf-8` compilation in `gui/windows/runner/CMakeLists.txt` so MSVC on
+  non-English Windows locales renders Czech tray menu strings cleanly instead of
+  Windows-1250 mojibake.
+- Fixed avatar `FileImage` cache invalidation on avatar changes via `avatar_rev`
+  tracking and fixed `Command::StarMessage` / `UnstarMessage` canonical JID
+  resolution and state persistence.
 
 ## [0.3.5] - 2026-11-15
 

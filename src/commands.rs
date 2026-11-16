@@ -315,6 +315,12 @@ pub enum Command {
         chat_jid: Option<Jid>,
         count: u32,
     },
+    /// Recursively fetch older message batches via PDO for one chat (or all chats when None).
+    SyncFullHistory {
+        chat_jid: Option<Jid>,
+    },
+    /// Stop an active full-history sync loop.
+    CancelFullHistorySync,
     
     // Shutdown
     Shutdown,

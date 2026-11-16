@@ -44,7 +44,7 @@ fn show_welcome_screen(ui: &mut Ui, _state: &AppState) {
                     ui.label(RichText::new("💬").font(FontId::proportional(64.0)));
                     ui.add_space(24.0);
                     
-                    ui.label(RichText::new("Warust").font(FontId::proportional(32.0)).strong().color(Color32::WHITE));
+                    ui.label(RichText::new("WaLite").font(FontId::proportional(32.0)).strong().color(Color32::WHITE));
                     ui.add_space(8.0);
                     ui.label(RichText::new("WhatsApp Desktop Client").font(FontId::proportional(16.0)).color(Color32::from_rgb(0x86, 0x96, 0xA0)));
                     

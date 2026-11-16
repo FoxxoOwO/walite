@@ -147,7 +147,7 @@ pub fn extract_links(text: &str) -> Vec<String> {
 }
 
 /// What to call a document in the gallery list.
-fn document_label(message: &Message) -> String {
+pub(crate) fn document_label(message: &Message) -> String {
     if let Some(path) = message.media_path.as_deref() {
         if let Some(name) = std::path::Path::new(path).file_name() {
             return name.to_string_lossy().to_string();
@@ -163,7 +163,7 @@ fn document_label(message: &Message) -> String {
     }
 }
 
-fn is_gallery_media(kind: Option<MediaType>) -> bool {
+pub(crate) fn is_gallery_media(kind: Option<MediaType>) -> bool {
     matches!(
         kind,
         Some(MediaType::Image) | Some(MediaType::Video) | Some(MediaType::Sticker)

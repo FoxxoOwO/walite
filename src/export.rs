@@ -301,7 +301,7 @@ pub fn export_to_html(
     <div class="chat-header">
       <div>
         <div class="chat-title">{}</div>
-        <div class="chat-subtitle">Exported from Warust WhatsApp Client</div>
+        <div class="chat-subtitle">Exported from WaLite WhatsApp Client</div>
       </div>
       <div class="badge">{} messages</div>
     </div>
@@ -335,7 +335,7 @@ pub fn default_export_dir() -> PathBuf {
     let base = dirs::document_dir()
         .or_else(dirs::download_dir)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    base.join("Warust_Exports")
+    base.join("WaLite_Exports")
 }
 
 /// Sanitize filename for operating system

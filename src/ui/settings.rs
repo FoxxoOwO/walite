@@ -219,7 +219,7 @@ fn show_notifications_settings(ui: &mut Ui, s: &mut crate::state::AppState) {
         ui.horizontal(|ui| {
             if ui.button("Vyzkoušet oznámení").clicked() {
                 let shown = crate::notifications::show_toast(
-                    "Warust",
+                    "WaLite",
                     "Takto vypadá oznámení o nové zprávě.",
                 );
                 crate::notifications::play_sound();
@@ -302,7 +302,7 @@ fn show_storage_settings(ui: &mut Ui, s: &mut crate::state::AppState, backend: &
 
     setting_card(ui, "Verze aplikace", |ui| {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Warust:").strong());
+            ui.label(RichText::new("WaLite:").strong());
             ui.monospace(format!("v{}", crate::updater::CURRENT_VERSION));
         });
         ui.horizontal(|ui| {
@@ -530,7 +530,7 @@ fn show_system_settings(ui: &mut Ui, s: &mut crate::state::AppState) {
 
     setting_card(ui, "Spuštění se systémem Windows", |ui| {
         let mut autostart = s.preferences.start_with_windows;
-        if ui.checkbox(&mut autostart, "Spouštět Warust při přihlášení do Windows").changed() {
+        if ui.checkbox(&mut autostart, "Spouštět WaLite při přihlášení do Windows").changed() {
             s.preferences.start_with_windows = autostart;
             let _ = crate::autostart::set_autostart_enabled(autostart);
         }
@@ -544,7 +544,7 @@ fn show_system_settings(ui: &mut Ui, s: &mut crate::state::AppState) {
     setting_card(ui, "Oznamovací oblast (Systémová lišta / Tray)", |ui| {
         ui.checkbox(&mut s.preferences.close_to_tray, "Zavřením okna (křížkem) minimalizovat do systémové lišty");
         ui.label(
-            RichText::new("Při kliknutí na křížek se okno pouze skryje a Warust zůstane aktivní na pozadí pro příjem zpráv a hovorů.")
+            RichText::new("Při kliknutí na křížek se okno pouze skryje a WaLite zůstane aktivní na pozadí pro příjem zpráv a hovorů.")
                 .font(FontId::proportional(11.0))
                 .color(Color32::from_rgb(0x86, 0x96, 0xA0))
         );

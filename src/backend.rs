@@ -223,6 +223,99 @@ impl BackendHandle {
 }
 
 static FETCHING_INITIAL_HISTORY: AtomicBool = AtomicBool::new(false);
+static CANCEL_FULL_HISTORY: AtomicBool = AtomicBool::new(false);
+static HISTORY_SYNC_NOTIFY: std::sync::LazyLock<tokio::sync::Notify> =
+    std::sync::LazyLock::new(tokio::sync::Notify::new);
+
+/// Pull older history batches via PDO for a single chat until the phone stops
+/// returning older messages (or `max_batches` is reached / cancelled).
+async fn sync_chat_history_batches(
+    client: Arc<Client>,
+    state: SharedState,
+    target: Jid,
+    max_batches: usize,
+) {
+    {
+        let mut s = state.write();
+        if !s.history_syncing_chats.insert(target.clone()) {
+            return;
+        }
+        s.history_exhausted_chats.remove(&target);
+    }
+
+    for _batch in 0..max_batches {
+        if CANCEL_FULL_HISTORY.load(Ordering::Relaxed) {
+            break;
+        }
+        let (oldest_id, from_me, timestamp_ms, count_before, oldest_ts_before) = {
+            let s = state.read();
+            if let Some(msgs) = s.get_chat_messages(&target) {
+                if let Some(first) = msgs.first() {
+                    (
+                        first.id.clone(),
+                        first.from_me,
+                        first.timestamp.timestamp_millis(),
+                        msgs.len(),
+                        Some(first.timestamp),
+                    )
+                } else {
+                    (String::new(), false, 0, 0, None)
+                }
+            } else {
+                (String::new(), false, 0, 0, None)
+            }
+        };
+
+        let notified = HISTORY_SYNC_NOTIFY.notified();
+        tokio::pin!(notified);
+
+        info!("Full history sync requesting 50 older messages for {}", target);
+        if let Err(e) = client
+            .fetch_message_history(&target, &oldest_id, from_me, timestamp_ms, 50)
+            .await
+        {
+            warn!("Full history sync request failed for {}: {}", target, e);
+            break;
+        }
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        let mut advanced = false;
+        while tokio::time::Instant::now() < deadline {
+            if CANCEL_FULL_HISTORY.load(Ordering::Relaxed) {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if tokio::time::timeout(remaining, &mut notified).await.is_err() {
+                break;
+            }
+            let (count_after, oldest_ts_after) = {
+                let s = state.read();
+                let msgs = s.get_chat_messages(&target);
+                (
+                    msgs.map_or(0, |m| m.len()),
+                    msgs.and_then(|m| m.first().map(|f| f.timestamp)),
+                )
+            };
+            if count_after > count_before || oldest_ts_after < oldest_ts_before {
+                advanced = true;
+                break;
+            }
+            notified.set(HISTORY_SYNC_NOTIFY.notified());
+        }
+
+        if !advanced {
+            if !CANCEL_FULL_HISTORY.load(Ordering::Relaxed) {
+                state.write().history_exhausted_chats.insert(target.clone());
+            }
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    state.write().history_syncing_chats.remove(&target);
+    crate::storage::persist_or_log(&state).await;
+}
 
 /// Automatically load the first 20 messages for each conversation.
 /// If `force` is false, it only runs on the FIRST login (when `initial_history_fetched` is false).
@@ -340,10 +433,13 @@ async fn create_and_spawn_bot(
                 let _ = tx.send(ConnectionStatus::Connected);
                 info!("WhatsApp connected!");
                 
-                // Update self JID
-                if let Some(jid) = client.pn().or(client.lid()) {
+                // Update self JID and connection state
+                {
                     let mut s = state.write();
-                    s.self_jid = Some(jid);
+                    s.connection = ConnectionStatus::Connected;
+                    if let Some(jid) = client.pn().or(client.lid()) {
+                        s.self_jid = Some(jid);
+                    }
                 }
 
                 // Trigger background sync for contacts (CriticalUnblockLow, RegularLow, and CriticalBlock)
@@ -396,6 +492,26 @@ async fn create_and_spawn_bot(
                         }
                     }
                     crate::avatars::sync_all_avatars(&client_clone, &state_clone2, false).await;
+
+                    let self_jid = {
+                        state_clone2.read().self_jid.as_ref().map(|j| j.to_non_ad())
+                    };
+                    if let Some(me) = self_jid {
+                        crate::avatars::fetch_avatar(&client_clone, &me, false).await;
+                        if let Ok(infos) = client_clone.contacts().get_user_info(std::slice::from_ref(&me)).await {
+                            if let Some(info) = infos.values().next() {
+                                if let Some(ref about) = info.status {
+                                    let mut s = state_clone2.write();
+                                    let trimmed = about.trim().to_string();
+                                    let next = (!trimmed.is_empty()).then_some(trimmed);
+                                    if s.self_status != next {
+                                        s.self_status = next;
+                                        s.dirty = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     info!("Fetching participating groups...");
                     if let Ok(groups) = client_clone.groups().get_participating().await {
@@ -1011,24 +1127,12 @@ async fn handle_incoming_message(
     }
 
     if let Some(media) = extract_media_info(&message) {
-        let local_path = crate::media::get_local_path(
-            &msg_id,
-            media.caption.as_deref(),
-            media.mimetype.as_deref(),
-            media.media_type,
-        );
-        if local_path.exists() {
-            msg.media_path = Some(local_path.to_string_lossy().to_string());
-        }
-        msg.media_type = Some(media.media_type);
-        msg.media_direct_path = media.direct_path;
-        msg.media_key = media.media_key;
-        msg.media_file_sha256 = media.file_sha256;
-        msg.media_file_enc_sha256 = media.file_enc_sha256;
-        msg.media_file_length = media.file_length;
-        msg.media_mimetype = media.mimetype;
-        msg.media_caption = media.caption;
-        msg.media_jpeg_thumbnail = media.jpeg_thumbnail;
+        apply_extracted_media(&mut msg, &msg_id, media);
+    }
+
+    let contact_cards = extract_contact_cards(&message);
+    if !contact_cards.is_empty() {
+        msg.contacts = contact_cards;
     }
 
     if message.is_view_once() {
@@ -1145,7 +1249,8 @@ async fn handle_incoming_message(
                 body = format!("Zmínka · {body}");
             }
             if desktop {
-                crate::notifications::notify(&title, &body, sound);
+                let target_str = state.read().canonical_jid(&chat_jid).to_string();
+                crate::notifications::notify_for_chat(Some(&target_str), &title, &body, sound);
             } else if sound {
                 crate::notifications::play_sound();
             }
@@ -1183,6 +1288,52 @@ struct ExtractedMedia {
     mimetype: Option<String>,
     caption: Option<String>,
     jpeg_thumbnail: Option<Vec<u8>>,
+    gif_playback: bool,
+}
+
+fn apply_extracted_media(msg: &mut Message, msg_id: &str, media: ExtractedMedia) {
+    let local_path = crate::media::get_local_path(
+        msg_id,
+        media.caption.as_deref(),
+        media.mimetype.as_deref(),
+        media.media_type,
+    );
+    if local_path.exists() {
+        msg.media_path = Some(local_path.to_string_lossy().to_string());
+    }
+    msg.media_type = Some(media.media_type);
+    msg.media_direct_path = media.direct_path;
+    msg.media_key = media.media_key;
+    msg.media_file_sha256 = media.file_sha256;
+    msg.media_file_enc_sha256 = media.file_enc_sha256;
+    msg.media_file_length = media.file_length;
+    msg.media_mimetype = media.mimetype;
+    msg.media_caption = media.caption;
+    msg.media_jpeg_thumbnail = media.jpeg_thumbnail;
+    msg.gif_playback = media.gif_playback;
+}
+
+fn extract_contact_cards(message: &wa::Message) -> Vec<crate::vcard::ContactCard> {
+    use whatsapp_rust::wacore::proto_helpers::MessageExt;
+    let base = message.get_base_message();
+    let mut cards = Vec::new();
+    if let Some(c) = base.contact_message.as_option() {
+        if let Some(vcard) = c.vcard.as_deref() {
+            if let Some(parsed) = crate::vcard::parse_vcard(vcard, c.display_name.as_deref()) {
+                cards.push(parsed);
+            }
+        }
+    }
+    if let Some(arr) = base.contacts_array_message.as_option() {
+        for c in &arr.contacts {
+            if let Some(vcard) = c.vcard.as_deref() {
+                if let Some(parsed) = crate::vcard::parse_vcard(vcard, c.display_name.as_deref()) {
+                    cards.push(parsed);
+                }
+            }
+        }
+    }
+    cards
 }
 
 fn extract_media_info(message: &wa::Message) -> Option<ExtractedMedia> {
@@ -1200,6 +1351,7 @@ fn extract_media_info(message: &wa::Message) -> Option<ExtractedMedia> {
             mimetype: img.mimetype.clone(),
             caption: img.caption.clone(),
             jpeg_thumbnail: img.jpeg_thumbnail.clone(),
+            gif_playback: false,
         });
     }
     if let Some(vid) = base.video_message.as_option() {
@@ -1213,6 +1365,7 @@ fn extract_media_info(message: &wa::Message) -> Option<ExtractedMedia> {
             mimetype: vid.mimetype.clone(),
             caption: vid.caption.clone(),
             jpeg_thumbnail: vid.jpeg_thumbnail.clone(),
+            gif_playback: vid.gif_playback.unwrap_or(false),
         });
     }
     if let Some(audio) = base.audio_message.as_option() {
@@ -1227,6 +1380,7 @@ fn extract_media_info(message: &wa::Message) -> Option<ExtractedMedia> {
             mimetype: audio.mimetype.clone(),
             caption: None,
             jpeg_thumbnail: None,
+            gif_playback: false,
         });
     }
     if let Some(doc) = base.document_message.as_option() {
@@ -1241,6 +1395,7 @@ fn extract_media_info(message: &wa::Message) -> Option<ExtractedMedia> {
             mimetype: doc.mimetype.clone(),
             caption: fname.or_else(|| doc.caption.clone()),
             jpeg_thumbnail: doc.jpeg_thumbnail.clone(),
+            gif_playback: false,
         });
     }
     if let Some(stk) = base.sticker_message.as_option() {
@@ -1254,6 +1409,7 @@ fn extract_media_info(message: &wa::Message) -> Option<ExtractedMedia> {
             mimetype: stk.mimetype.clone(),
             caption: None,
             jpeg_thumbnail: None,
+            gif_playback: false,
         });
     }
     None
@@ -1299,10 +1455,6 @@ fn extract_message_text(message: &wa::Message) -> &str {
     if message.sticker_message.is_set() {
         return "🎨 Sticker";
     }
-    // Shared contact card
-    if message.contact_message.is_set() {
-        return "👤 Kontakt";
-    }
     // Check for audio / voice note
     if let Some(audio) = message.audio_message.as_option() {
         if audio.ptt.unwrap_or(false) {
@@ -1310,12 +1462,18 @@ fn extract_message_text(message: &wa::Message) -> &str {
         }
         return "🎵 Audio";
     }
-    // Check for contact
+    // Check for contact or contact list
     if let Some(contact) = message.contact_message.as_option() {
         if let Some(display_name) = contact.display_name.as_deref() {
             return display_name;
         }
-        return "[Contact]";
+        return "👤 Kontakt";
+    }
+    if let Some(arr) = message.contacts_array_message.as_option() {
+        if let Some(display_name) = arr.display_name.as_deref() {
+            return display_name;
+        }
+        return "👥 Kontakty";
     }
     // Check for location
     if message.location_message.is_set() {
@@ -1447,7 +1605,14 @@ async fn handle_event(
         Event::HistorySync(lazy_sync) => {
             let progress = lazy_sync.progress().unwrap_or(0) as u8;
             info!("Received HistorySync chunk: type={}, chunk_order={:?}, progress={}%", lazy_sync.sync_type(), lazy_sync.chunk_order(), progress);
-            let _ = tx_status.send(ConnectionStatus::Syncing(progress));
+            tx_status.send_if_modified(|status| {
+                if matches!(status, ConnectionStatus::Connected) {
+                    false
+                } else {
+                    *status = ConnectionStatus::Syncing(progress);
+                    true
+                }
+            });
             
             // Process history sync conversations using streaming for lenient decoding
             let mut stream = lazy_sync.stream();
@@ -1691,24 +1856,12 @@ async fn handle_event(
                                 );
 
                                 if let Some(media) = wa_message.and_then(|m| extract_media_info(m)) {
-                                    let local_path = crate::media::get_local_path(
-                                        &msg_id,
-                                        media.caption.as_deref(),
-                                        media.mimetype.as_deref(),
-                                        media.media_type,
-                                    );
-                                    if local_path.exists() {
-                                        message.media_path = Some(local_path.to_string_lossy().to_string());
+                                    apply_extracted_media(&mut message, &msg_id, media);
+                                }
+                                if let Some(cards) = wa_message.map(extract_contact_cards) {
+                                    if !cards.is_empty() {
+                                        message.contacts = cards;
                                     }
-                                    message.media_type = Some(media.media_type);
-                                    message.media_direct_path = media.direct_path;
-                                    message.media_key = media.media_key;
-                                    message.media_file_sha256 = media.file_sha256;
-                                    message.media_file_enc_sha256 = media.file_enc_sha256;
-                                    message.media_file_length = media.file_length;
-                                    message.media_mimetype = media.mimetype;
-                                    message.media_caption = media.caption;
-                                    message.media_jpeg_thumbnail = media.jpeg_thumbnail;
                                 }
                                 
                                 batch_messages.push(message);
@@ -1775,12 +1928,20 @@ async fn handle_event(
                     }
                     s.consolidate_canonical_chats();
                 }
+                HISTORY_SYNC_NOTIFY.notify_waiters();
                 crate::storage::persist_or_log(&state).await;
             }
             
             // Mark connected immediately if 100%, or set up auto-settle debounce
             if progress >= 100 {
-                let _ = tx_status.send(ConnectionStatus::Connected);
+                tx_status.send_if_modified(|status| {
+                    if matches!(status, ConnectionStatus::Connected) {
+                        false
+                    } else {
+                        *status = ConnectionStatus::Connected;
+                        true
+                    }
+                });
                 let client_clone = client.clone();
                 let state_clone = state.clone();
                 tokio::spawn(async move {
@@ -1993,10 +2154,10 @@ async fn handle_event(
             match &call.action {
                 CallAction::Offer { .. } | CallAction::OfferNotice { .. } => {
                     call_manager.incoming_calls.lock().await.insert(call_id.clone(), call.clone());
-                    let peer_name = {
+                    let (peer_name, peer_str) = {
                         let s = state.read();
                         let canon = s.canonical_jid(&from_jid);
-                        if let Some(contact) = s.contacts.get(&canon) {
+                        let name = if let Some(contact) = s.contacts.get(&canon) {
                             if let Some(ref n) = contact.name {
                                 n.clone()
                             } else {
@@ -2006,24 +2167,46 @@ async fn handle_event(
                             chat.name.clone()
                         } else {
                             crate::util::format_jid(&from_jid)
-                        }
+                        };
+                        (name, canon.to_string())
                     };
 
-                    let mut s = state.write();
-                    s.active_call = Some(crate::state::ActiveCall {
-                        call_id,
-                        peer_jid: from_jid,
-                        peer_name,
-                        call_creator: creator_jid,
-                        is_video,
-                        is_group,
-                        status: crate::state::CallStatus::Incoming,
-                        is_muted: false,
-                        is_video_enabled: is_video,
-                        started_at: chrono::Utc::now(),
-                        connected_at: None,
-                        ended_at: None,
-                    });
+                    let (desktop, sound) = {
+                        let mut s = state.write();
+                        s.active_call = Some(crate::state::ActiveCall {
+                            call_id,
+                            peer_jid: from_jid,
+                            peer_name: peer_name.clone(),
+                            call_creator: creator_jid,
+                            is_video,
+                            is_group,
+                            status: crate::state::CallStatus::Incoming,
+                            is_muted: false,
+                            is_video_enabled: is_video,
+                            started_at: chrono::Utc::now(),
+                            connected_at: None,
+                            ended_at: None,
+                        });
+                        (
+                            s.preferences.desktop_notifications,
+                            s.preferences.sound_notifications,
+                        )
+                    };
+                    let title = if is_video {
+                        "Příchozí videohovor"
+                    } else {
+                        "Příchozí hovor"
+                    };
+                    if desktop {
+                        crate::notifications::notify_for_chat(
+                            Some(&peer_str),
+                            title,
+                            &peer_name,
+                            sound,
+                        );
+                    } else if sound {
+                        crate::notifications::play_sound();
+                    }
                 }
                 CallAction::Terminate { reason, .. } => {
                     let mut s = state.write();
@@ -2085,6 +2268,16 @@ async fn handle_event(
         
         Event::UserAboutUpdate(about_update) => {
             debug!("About update for {}", about_update.jid);
+            let mut s = state.write();
+            let canon = s.canonical_jid(&about_update.jid.to_non_ad());
+            let is_self = s.self_jid.as_ref().map_or(false, |me| {
+                me.user == canon.user || me.user == about_update.jid.user
+            });
+            if is_self {
+                let trimmed = about_update.status.trim().to_string();
+                s.self_status = (!trimmed.is_empty()).then_some(trimmed);
+                s.dirty = true;
+            }
         }
         
         Event::GroupUpdate(group_update) => {
@@ -2256,6 +2449,7 @@ async fn handle_command(
     let client = active_client.read().await.clone();
     match cmd {
         Command::DismissSyncing => {
+            state.write().connection = ConnectionStatus::Connected;
             let _ = tx_status.send(ConnectionStatus::Connected);
         }
 
@@ -2347,7 +2541,7 @@ async fn handle_command(
             };
             let res = client.send_message(canon_to.clone(), msg).await?;
             let sender = client.pn().or(client.lid()).unwrap_or_else(|| canon_to.clone());
-            let message = Message::new_text(
+            let mut message = Message::new_text(
                 res.message_id,
                 canon_to.clone(),
                 sender,
@@ -2358,6 +2552,11 @@ async fn handle_command(
                 reply_to,
                 None,
             );
+            message.contacts.push(crate::vcard::ContactCard {
+                name: display_name,
+                phone: format!("+{phone}"),
+                waid: Some(phone),
+            });
             {
                 let mut s = state.write();
                 s.add_message(message);
@@ -3204,21 +3403,31 @@ async fn handle_command(
         }
         
         Command::StarMessage { chat_jid, message_id } => {
-            // star_message takes: chat_jid, participant_jid, message_id, from_me
-            // We need to find the message to know from_me and participant_jid
-            let (from_me, participant_jid) = state.read().messages.get(&chat_jid)
+            let canon = state.read().canonical_jid(&chat_jid);
+            let (from_me, participant_jid) = state
+                .read()
+                .get_chat_messages(&canon)
                 .and_then(|msgs| msgs.iter().find(|m| m.id == message_id))
                 .map(|m| (m.from_me, if m.from_me { None } else { Some(m.sender_jid.clone()) }))
                 .unwrap_or((true, None));
-            client.chat_actions().star_message(&chat_jid, participant_jid.as_ref(), &message_id, from_me).await?;
+            client.chat_actions().star_message(&canon, participant_jid.as_ref(), &message_id, from_me).await?;
+            if state.write().set_message_starred(&canon, &message_id, true) {
+                crate::storage::persist_or_log(&state).await;
+            }
         }
         
         Command::UnstarMessage { chat_jid, message_id } => {
-            let (from_me, participant_jid) = state.read().messages.get(&chat_jid)
+            let canon = state.read().canonical_jid(&chat_jid);
+            let (from_me, participant_jid) = state
+                .read()
+                .get_chat_messages(&canon)
                 .and_then(|msgs| msgs.iter().find(|m| m.id == message_id))
                 .map(|m| (m.from_me, if m.from_me { None } else { Some(m.sender_jid.clone()) }))
                 .unwrap_or((true, None));
-            client.chat_actions().unstar_message(&chat_jid, participant_jid.as_ref(), &message_id, from_me).await?;
+            client.chat_actions().unstar_message(&canon, participant_jid.as_ref(), &message_id, from_me).await?;
+            if state.write().set_message_starred(&canon, &message_id, false) {
+                crate::storage::persist_or_log(&state).await;
+            }
         }
         
         Command::PinMessage { chat_jid, message_id, duration_secs } => {
@@ -3712,14 +3921,37 @@ async fn handle_command(
         
         Command::SetPushName { name } => {
             client.profile().set_push_name(&name).await?;
+            {
+                let mut s = state.write();
+                s.self_name = (!name.is_empty()).then_some(name);
+                s.dirty = true;
+            }
+            crate::storage::persist_or_log(&state).await;
         }
         
         Command::SetStatusText { text } => {
             client.profile().set_status_text(&text).await?;
+            {
+                let mut s = state.write();
+                let trimmed = text.trim().to_string();
+                s.self_status = (!trimmed.is_empty()).then_some(trimmed);
+                s.dirty = true;
+            }
+            crate::storage::persist_or_log(&state).await;
         }
         
         Command::SetProfilePicture { data } => {
-            client.profile().set_profile_picture(data).await?;
+            if data.is_empty() {
+                client.profile().remove_profile_picture().await?;
+                if let Some(me) = state.read().self_jid.as_ref().map(|j| j.to_non_ad()) {
+                    crate::avatars::remove_cached(&me);
+                }
+            } else {
+                client.profile().set_profile_picture(data.clone()).await?;
+                if let Some(me) = state.read().self_jid.as_ref().map(|j| j.to_non_ad()) {
+                    let _ = crate::avatars::save_cached_jpeg(&me, &data);
+                }
+            }
         }
         
         Command::SetPrivacy { category, value } => {
@@ -3832,6 +4064,43 @@ async fn handle_command(
                 });
             }
         }
+
+        Command::SyncFullHistory { chat_jid } => {
+            CANCEL_FULL_HISTORY.store(false, Ordering::Relaxed);
+            if let Some(raw_jid) = chat_jid {
+                let target = state.read().canonical_jid(&raw_jid);
+                let client = client.clone();
+                let state_clone = state.clone();
+                tokio::spawn(async move {
+                    sync_chat_history_batches(client, state_clone, target, 120).await;
+                });
+            } else {
+                let targets: Vec<Jid> = {
+                    let s = state.read();
+                    s.filtered_chats()
+                        .into_iter()
+                        .map(|c| s.canonical_jid(&c.jid))
+                        .filter(|j| !s.history_exhausted_chats.contains(j))
+                        .collect()
+                };
+                let client = client.clone();
+                let state_clone = state.clone();
+                tokio::spawn(async move {
+                    for target in targets {
+                        if CANCEL_FULL_HISTORY.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        sync_chat_history_batches(client.clone(), state_clone.clone(), target, 10).await;
+                    }
+                });
+            }
+        }
+
+        Command::CancelFullHistorySync => {
+            CANCEL_FULL_HISTORY.store(true, Ordering::Relaxed);
+            HISTORY_SYNC_NOTIFY.notify_waiters();
+            state.write().history_syncing_chats.clear();
+        }
         
         Command::Connect => {
             info!("Connect requested - triggering QR code generation");
@@ -3899,6 +4168,7 @@ async fn handle_command(
                     let mut s = state.write();
                     s.self_jid = None;
                     s.self_name = None;
+                    s.self_status = None;
                     s.chats.clear();
                     s.messages.clear();
                     s.contacts.clear();

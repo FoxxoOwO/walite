@@ -1,8 +1,8 @@
 [package]
 name = "warust"
-version = "0.3.5"
+version = "1.0.0"
 edition = "2021"
-description = "WhatsApp desktop client in Rust (egui + whatsapp-rust)"
+description = "WaLite — lightweight WhatsApp desktop client (Flutter GUI + Rust backend)"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/FoxxoOwO/warust"
 readme = "README.md"

@@ -178,7 +178,7 @@ impl eframe::App for WarustApp {
         Panel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.add_space(12.0);
-                ui.label(RichText::new("Warust").font(FontId::proportional(18.0)).strong());
+                ui.label(RichText::new("WaLite").font(FontId::proportional(18.0)).strong());
                 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(12.0);
