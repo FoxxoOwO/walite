@@ -322,6 +322,21 @@ fn handle_command(raw: &str, backend: &BackendHandle) {
                 let _ = backend.send_command(Command::DeleteChat { chat_jid: jid });
             }
         }
+        Some("export_chat") => {
+            if let Some(jid) = jid_field(&value, "chat") {
+                let format = match value["format"].as_str() {
+                    Some("json") => crate::export::ExportFormat::Json,
+                    Some("html") => crate::export::ExportFormat::Html,
+                    _ => crate::export::ExportFormat::Txt,
+                };
+                let custom_dir = value["dir"].as_str().map(std::path::PathBuf::from);
+                let _ = backend.send_command(Command::ExportChat {
+                    chat_jid: jid,
+                    format,
+                    custom_dir,
+                });
+            }
+        }
         Some("group_info") => {
             if let Some(jid) = jid_field(&value, "chat") {
                 let _ = backend.send_command(Command::RequestGroupInfo { chat_jid: jid });
