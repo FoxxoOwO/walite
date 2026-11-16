@@ -440,6 +440,44 @@ fn handle_command(raw: &str, backend: &BackendHandle) {
                 let _ = backend.send_command(Command::SendScheduledMessageNow { id });
             }
         }
+        // A single choice poll is voted by tapping; the GUI sends the whole
+        // selection either way, which matches `VotePoll`'s `option_names`.
+        Some("create_poll") => {
+            if let Some(jid) = jid_field(&value, "chat") {
+                let question = value["question"].as_str().unwrap_or_default().trim().to_string();
+                let options = strings_field(&value, "options");
+                if !question.is_empty() && options.len() >= 2 {
+                    let _ = backend.send_command(Command::CreatePoll {
+                        chat_jid: jid,
+                        question,
+                        options,
+                        selectable_count: value["selectable"].as_u64().unwrap_or(1) as u32,
+                    });
+                }
+            }
+        }
+        // The creation secret never leaves Rust: it is looked up from the
+        // message the vote refers to.
+        Some("vote_poll") => {
+            if let (Some(jid), Some(id)) = (jid_field(&value, "chat"), id_field(&value)) {
+                let poll = {
+                    let s = backend.state.read();
+                    s.get_chat_messages(&jid)
+                        .and_then(|msgs| msgs.iter().find(|m| m.id == id))
+                        .and_then(|m| m.poll.as_ref())
+                        .map(|p| (p.creator.clone(), p.secret.clone()))
+                };
+                if let Some((poll_creator, message_secret)) = poll {
+                    let _ = backend.send_command(Command::VotePoll {
+                        chat_jid: jid,
+                        message_id: id,
+                        poll_creator,
+                        message_secret,
+                        option_names: strings_field(&value, "options"),
+                    });
+                }
+            }
+        }
         Some("search") => {
             let query = value["q"].as_str().unwrap_or_default().to_string();
             let _ = backend.send_command(Command::search(query));
@@ -460,6 +498,21 @@ fn jids_field(value: &Value, key: &str) -> Vec<Jid> {
     value[key]
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str().and_then(|s| s.parse::<Jid>().ok())).collect())
+        .unwrap_or_default()
+}
+
+/// Trimmed, non-empty strings from an array field. Poll options and voter
+/// names go through this so a blank row in the GUI dialog is just ignored.
+fn strings_field(value: &Value, key: &str) -> Vec<String> {
+    value[key]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -513,6 +566,7 @@ fn snapshot(state: &SharedState) -> String {
     });
 
     let mut messages: Vec<Value> = Vec::new();
+    let me = s.self_jid.as_ref().map(|j| j.to_string()).unwrap_or_default();
     if let Some(selected) = s.selected_chat.as_ref() {
         if let Some(list) = s.get_chat_messages(selected) {
             let window = MESSAGE_LIMIT.load(Ordering::Relaxed);
@@ -536,6 +590,19 @@ fn snapshot(state: &SharedState) -> String {
                     "reply_to": m.reply_to,
                     "edited": m.edited,
                     "view_once": m.view_once,
+                    "poll": m.poll.as_ref().map(|p| json!({
+                        "question": p.question,
+                        "options": p.options,
+                        "selectable": p.selectable_count,
+                        "quiz": p.is_quiz,
+                        "voters": p.total_voters(),
+                        "mine": p.my_vote(&me),
+                        "tallies": p
+                            .tallies()
+                            .into_iter()
+                            .map(|(option, votes)| json!({"option": option, "votes": votes}))
+                            .collect::<Vec<_>>(),
+                    })),
                     "reactions": reactions,
                 }));
             }
