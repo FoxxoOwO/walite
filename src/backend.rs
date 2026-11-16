@@ -2393,6 +2393,14 @@ async fn handle_command(
             }
         }
         
+        Command::SendChatState { chat_jid, composing } => {
+            let canon = state.read().canonical_jid(&chat_jid);
+            if composing {
+                client.chatstate().send_composing(&canon).await?;
+            } else {
+                client.chatstate().send_paused(&canon).await?;
+            }
+        }
         Command::SendMedia { chat_jid, file_path, caption, reply_to, view_once } => {
             let canon_to = state.read().canonical_jid(&chat_jid);
             let quote_context = reply_to.as_ref().and_then(|reply_id| {

@@ -48,6 +48,11 @@ pub enum Command {
         /// Wrap the attachment so the recipient can open it only once.
         view_once: bool,
     },
+    /// Tell the partner we started or stopped typing (`<chatstate>`).
+    SendChatState {
+        chat_jid: Jid,
+        composing: bool,
+    },
     /// Send a recorded voice note (already encoded to OGG/Opus by the recorder).
     SendVoiceNote {
         chat_jid: Jid,
