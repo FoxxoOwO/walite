@@ -7,6 +7,12 @@ are also published on the [Releases page](https://github.com/FoxxoOwO/walite/rel
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-11-17
+
+### Fixed
+- **Windows Auto-Updater**: Replaced the `.cmd` batch updater with a UTF-8 BOM PowerShell script (`warust-update.ps1`) and enabled `JOB_OBJECT_LIMIT_BREAKAWAY_OK` / `CREATE_BREAKAWAY_FROM_JOB`, fixing non-ASCII folder paths (e.g. `Stažené soubory`), properly closing and updating `warust_gui.exe` + all runtime assets, and relaunching `warust_gui.exe` instead of headless `warust.exe`.
+- **Notification Sound Clicks**: Replaced abrupt note cut-offs with a 48 kHz raised-cosine attack/release envelope (`generate_tone_samples`) and a 50 ms sink drain delay, eliminating audible pops/crackles at the end of notification tones.
+
 ## [1.0.1] - 2026-11-17
 
 ### Added
