@@ -333,6 +333,8 @@ class Prefs {
     this.chatWallpaperColor,
     this.chatWallpaperPath,
     this.chatWallpaperDoodles = true,
+    this.notificationSound,
+    this.customSoundPath,
   });
 
   final bool enterIsSend;
@@ -354,6 +356,8 @@ class Prefs {
   final String? chatWallpaperColor;
   final String? chatWallpaperPath;
   final bool chatWallpaperDoodles;
+  final String? notificationSound;
+  final String? customSoundPath;
 
   factory Prefs.fromJson(Map<String, dynamic> json) => Prefs(
         enterIsSend: json['enter_is_send'] as bool? ?? true,
@@ -375,6 +379,8 @@ class Prefs {
         chatWallpaperColor: json['chat_wallpaper_color'] as String?,
         chatWallpaperPath: json['chat_wallpaper_path'] as String?,
         chatWallpaperDoodles: json['chat_wallpaper_doodles'] as bool? ?? true,
+        notificationSound: json['notification_sound'] as String?,
+        customSoundPath: json['custom_sound_path'] as String?,
       );
 }
 
@@ -1100,6 +1106,11 @@ class Bridge {
   void removeProfilePicture() => _send({'type': 'remove_profile_picture'});
 
   void testNotification() => _send({'type': 'test_notification'});
+  void previewSound({String? preset, String? path}) => _send({
+        'type': 'preview_sound',
+        'preset': ?preset,
+        'path': ?path,
+      });
   void setWindowFocused(bool focused) =>
       _send({'type': 'window_focus', 'focused': focused});
 

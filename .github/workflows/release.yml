@@ -152,13 +152,18 @@ jobs:
           dest="target/${{ matrix.target }}/release"
           gui_rel="gui/build/windows/x64/runner/Release"
           cp "$dest/${{ matrix.artifact_name }}" "$dest/ffmpeg.exe" "$dest/ffprobe.exe" "$dest/FFMPEG-NOTICE.txt" "$gui_rel/"
-          (cd "$gui_rel" && 7z a "../../../../../../warust-${VERSION}-${{ matrix.asset_suffix }}" .)
+          mkdir -p dist
+          (cd "$gui_rel" && 7z a "../../../../../../dist/WaLite-${VERSION}-${{ matrix.asset_suffix }}" .)
+          cp "dist/WaLite-${VERSION}-${{ matrix.asset_suffix }}" "dist/warust-${VERSION}-${{ matrix.asset_suffix }}"
+          ver="${VERSION#v}"
+          "C:/Program Files (x86)/Inno Setup 6/ISCC.exe" "/DMyAppVersion=${ver}" installer/walite.iss
 
       - name: Package Unix artifact
         if: runner.os != 'Windows'
         run: |
+          mkdir -p dist
           cd target/${{ matrix.target }}/release
-          tar -czvf "../../../warust-${VERSION}-${{ matrix.asset_suffix }}" \
+          tar -czvf "../../../dist/warust-${VERSION}-${{ matrix.asset_suffix }}" \
             ${{ matrix.artifact_name }} ffmpeg ffprobe FFMPEG-NOTICE.txt
 
       - name: Upload artifact to GitHub Release
@@ -166,5 +171,5 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
           tag_name: ${{ env.VERSION }}
-          files: warust-${{ env.VERSION }}-${{ matrix.asset_suffix }}
+          files: dist/*
           token: ${{ secrets.GITHUB_TOKEN }}

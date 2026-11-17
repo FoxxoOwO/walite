@@ -670,44 +670,143 @@ class _SettingsDialogState extends State<SettingsDialog> {
   }
 
   Widget _notificationsTab(Prefs prefs, WaPalette p, Tr tr) {
-    return _card(
-      p,
-      tr.t('Upozornění a zvuky', 'Alerts and sounds'),
-      Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SwitchListTile(
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            title: Text(tr.t('Přehrát zvuk při příchozí zprávě',
-                'Play sound on incoming message')),
-            value: prefs.soundNotifications,
-            onChanged: (v) => widget.bridge.setPref('sound_notifications', v),
+    final activeSound = prefs.notificationSound ?? 'chime';
+    final hasCustom =
+        prefs.customSoundPath != null && prefs.customSoundPath!.isNotEmpty;
+    final presets = <(String, String)>[
+      ('chime', tr.t('Výchozí znělka', 'Default chime')),
+      ('pop', tr.t('Bublina (Pop)', 'Bubble pop')),
+      ('bell', tr.t('Zvonek', 'Crystal bell')),
+      ('soft', tr.t('Jemný tón', 'Soft ping')),
+      ('triple', tr.t('Trojtón', 'Triple chime')),
+      if (hasCustom) ('custom', tr.t('Vlastní zvuk', 'Custom sound')),
+    ];
+
+    return Column(
+      children: [
+        _card(
+          p,
+          tr.t('Upozornění a zvuky', 'Alerts and sounds'),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SwitchListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: Text(tr.t('Přehrát zvuk při příchozí zprávě',
+                    'Play sound on incoming message')),
+                value: prefs.soundNotifications,
+                onChanged: (v) =>
+                    widget.bridge.setPref('sound_notifications', v),
+              ),
+              SwitchListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: Text(tr.t('Zobrazovat náhled textu v oznámení',
+                    'Show message previews in notifications')),
+                value: prefs.showPreviews,
+                onChanged: (v) => widget.bridge.setPref('show_previews', v),
+              ),
+              SwitchListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: Text(tr.t('Systémová oznámení na ploše',
+                    'Desktop notifications')),
+                value: prefs.desktopNotifications,
+                onChanged: (v) =>
+                    widget.bridge.setPref('desktop_notifications', v),
+              ),
+              const SizedBox(height: 10),
+              OutlinedButton.icon(
+                onPressed: widget.bridge.testNotification,
+                icon: const Icon(Icons.notifications_active_outlined, size: 17),
+                label: Text(tr.t('Vyzkoušet oznámení', 'Test notification')),
+              ),
+            ],
           ),
-          SwitchListTile(
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            title: Text(tr.t('Zobrazovat náhled textu v oznámení',
-                'Show message previews in notifications')),
-            value: prefs.showPreviews,
-            onChanged: (v) => widget.bridge.setPref('show_previews', v),
+        ),
+        _card(
+          p,
+          tr.t('Zvuk upozornění', 'Notification sound'),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final (id, label) in presets)
+                    ChoiceChip(
+                      label: Text(label),
+                      selected: activeSound == id,
+                      onSelected: (_) {
+                        widget.bridge.setPref('notification_sound', id);
+                        widget.bridge.previewSound(
+                          preset: id,
+                          path: id == 'custom' ? prefs.customSoundPath : null,
+                        );
+                      },
+                    ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: () async {
+                      const typeGroup = XTypeGroup(
+                        label: 'Audio',
+                        extensions: ['wav', 'mp3', 'ogg', 'flac', 'm4a'],
+                      );
+                      final file = await openFile(
+                          acceptedTypeGroups: const [typeGroup]);
+                      if (file != null) {
+                        widget.bridge.setPref('custom_sound_path', file.path);
+                        widget.bridge.previewSound(
+                            preset: 'custom', path: file.path);
+                      }
+                    },
+                    icon: const Icon(Icons.music_note_outlined, size: 16),
+                    label: Text(tr.t(
+                        'Vybrat vlastní zvuk…', 'Choose custom sound…')),
+                  ),
+                  const SizedBox(width: 8),
+                  OutlinedButton.icon(
+                    onPressed: () => widget.bridge.previewSound(
+                      preset: activeSound,
+                      path: activeSound == 'custom'
+                          ? prefs.customSoundPath
+                          : null,
+                    ),
+                    icon: const Icon(Icons.play_arrow_rounded, size: 18),
+                    label: Text(tr.t('Přehrát', 'Preview')),
+                  ),
+                  if (hasCustom) ...[
+                    const SizedBox(width: 4),
+                    IconButton(
+                      tooltip:
+                          tr.t('Odebrat vlastní zvuk', 'Remove custom sound'),
+                      onPressed: () =>
+                          widget.bridge.setPref('custom_sound_path', null),
+                      icon: const Icon(Icons.close, size: 16),
+                    ),
+                  ],
+                ],
+              ),
+              if (hasCustom) ...[
+                const SizedBox(height: 6),
+                Text(
+                  prefs.customSoundPath!,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontSize: 11.5, color: WaPalette.textSecondary),
+                ),
+              ],
+            ],
           ),
-          SwitchListTile(
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            title: Text(tr.t('Systémová oznámení na ploše',
-                'Desktop notifications')),
-            value: prefs.desktopNotifications,
-            onChanged: (v) => widget.bridge.setPref('desktop_notifications', v),
-          ),
-          const SizedBox(height: 10),
-          OutlinedButton.icon(
-            onPressed: widget.bridge.testNotification,
-            icon: const Icon(Icons.notifications_active_outlined, size: 17),
-            label: Text(tr.t('Vyzkoušet oznámení', 'Test notification')),
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 

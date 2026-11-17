@@ -2400,6 +2400,8 @@ class ConversationViewState extends State<ConversationView> {
       for (final extra in _extraAttachments) {
         widget.bridge.sendMedia(chatJid, extra, viewOnce: _sendViewOnce);
       }
+      _draftTimer?.cancel();
+      widget.bridge.saveDraft(chatJid, '');
       setState(() {
         _pendingAttachmentPath = null;
         _extraAttachments.clear();
@@ -2411,6 +2413,8 @@ class ConversationViewState extends State<ConversationView> {
     }
 
     if (text.isEmpty) return;
+    _draftTimer?.cancel();
+    widget.bridge.saveDraft(chatJid, '');
     final mentions = _collectMentions(s, text);
     widget.bridge.sendText(
       chatJid,

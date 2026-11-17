@@ -399,6 +399,8 @@ void main() {
         'chat_wallpaper_color': '#0B221D',
         'chat_wallpaper_path': '/tmp/bg.jpg',
         'chat_wallpaper_doodles': false,
+        'notification_sound': 'bell',
+        'custom_sound_path': '/tmp/ding.wav',
       },
       'messages': [
         {
@@ -424,6 +426,8 @@ void main() {
     expect(snapshot.prefs.chatWallpaperColor, '#0B221D');
     expect(snapshot.prefs.chatWallpaperPath, '/tmp/bg.jpg');
     expect(snapshot.prefs.chatWallpaperDoodles, isFalse);
+    expect(snapshot.prefs.notificationSound, 'bell');
+    expect(snapshot.prefs.customSoundPath, '/tmp/ding.wav');
 
     final m = snapshot.messages.single;
     expect(m.starred, isTrue);

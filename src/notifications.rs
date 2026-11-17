@@ -209,18 +209,73 @@ fn show_toast_for_chat(chat_jid: Option<&str>, title: &str, body: &str) -> bool 
     }
 }
 
-/// Short two-tone chime. Synthesized, so it works with no bundled audio files.
+/// Supported built-in notification sound presets (`custom` uses `custom_sound_path`).
+pub const SOUND_PRESETS: &[&str] = &["chime", "pop", "bell", "soft", "triple", "custom"];
+
+#[derive(Clone, Default)]
+struct SoundConfig {
+    preset: String,
+    custom_path: Option<String>,
+}
+
+static SOUND_CONFIG: once_cell::sync::Lazy<Mutex<SoundConfig>> = once_cell::sync::Lazy::new(|| {
+    Mutex::new(SoundConfig {
+        preset: "chime".to_string(),
+        custom_path: None,
+    })
+});
+
+pub fn is_valid_sound_preset(preset: &str) -> bool {
+    SOUND_PRESETS.contains(&preset)
+}
+
+/// Update the active notification sound preset and optional custom audio file path.
+pub fn configure_sound(preset: Option<&str>, custom_path: Option<&str>) {
+    let mut cfg = SOUND_CONFIG.lock();
+    cfg.preset = preset
+        .map(str::trim)
+        .filter(|s| is_valid_sound_preset(s))
+        .unwrap_or("chime")
+        .to_string();
+    cfg.custom_path = custom_path
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+}
+
+/// Short notification sound using the configured preset or custom file.
 /// Does nothing when there is no output device - notifications must not panic
 /// on a headless or locked-down machine.
 pub fn play_sound() {
-    std::thread::spawn(|| {
-        if let Err(e) = play_sound_blocking() {
+    let cfg = SOUND_CONFIG.lock().clone();
+    std::thread::spawn(move || {
+        if let Err(e) = play_sound_blocking(&cfg.preset, cfg.custom_path.as_deref()) {
             debug!("notification sound skipped: {}", e);
         }
     });
 }
 
-fn play_sound_blocking() -> Result<(), String> {
+/// Immediately play a specific sound preset or custom file (for Settings preview).
+pub fn play_sound_preview(preset: Option<&str>, custom_path: Option<&str>) {
+    let fallback = SOUND_CONFIG.lock().clone();
+    let chosen_preset = preset
+        .map(str::trim)
+        .filter(|s| is_valid_sound_preset(s))
+        .unwrap_or(&fallback.preset)
+        .to_string();
+    let chosen_path = custom_path
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or(fallback.custom_path);
+    std::thread::spawn(move || {
+        if let Err(e) = play_sound_blocking(&chosen_preset, chosen_path.as_deref()) {
+            debug!("notification sound preview skipped: {}", e);
+        }
+    });
+}
+
+fn play_sound_blocking(preset: &str, custom_path: Option<&str>) -> Result<(), String> {
     use rodio::Source;
 
     let stream = rodio::DeviceSinkBuilder::open_default_sink()
@@ -228,14 +283,55 @@ fn play_sound_blocking() -> Result<(), String> {
     let player = rodio::Player::connect_new(stream.mixer());
     player.set_volume(0.6);
 
-    let note = |freq: f32, millis: u64| {
+    if preset == "custom" {
+        if let Some(path) = custom_path {
+            if let Ok(file) = std::fs::File::open(path) {
+                match rodio::Decoder::try_from(std::io::BufReader::new(file)) {
+                    Ok(source) => {
+                        player.append(source.take_duration(Duration::from_secs(6)));
+                        player.sleep_until_end();
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        debug!("failed to decode custom sound '{}': {}, falling back to chime", path, e);
+                    }
+                }
+            } else {
+                debug!("custom sound file '{}' not found, falling back to chime", path);
+            }
+        }
+    }
+
+    let note = |freq: f32, millis: u64, amp: f32| {
         rodio::source::SineWave::new(freq)
             .take_duration(Duration::from_millis(millis))
-            .amplify(0.25)
+            .amplify(amp)
             .fade_in(Duration::from_millis(4))
     };
-    player.append(note(880.0, 90));
-    player.append(note(1174.7, 120));
+
+    match preset {
+        "pop" => {
+            player.append(note(520.0, 45, 0.24));
+            player.append(note(980.0, 60, 0.26));
+        }
+        "bell" => {
+            player.append(note(1046.5, 110, 0.24));
+            player.append(note(1568.0, 180, 0.20));
+        }
+        "soft" => {
+            player.append(note(659.25, 80, 0.16));
+            player.append(note(784.0, 110, 0.14));
+        }
+        "triple" => {
+            player.append(note(659.25, 70, 0.22));
+            player.append(note(880.0, 70, 0.24));
+            player.append(note(1318.5, 110, 0.24));
+        }
+        _ => {
+            player.append(note(880.0, 90, 0.25));
+            player.append(note(1174.7, 120, 0.25));
+        }
+    }
     player.sleep_until_end();
     Ok(())
 }
@@ -294,5 +390,21 @@ mod tests {
         let out = preview(&czech);
         assert_eq!(out.chars().count(), 120);
         assert!(out.ends_with("..."));
+    }
+
+    #[test]
+    fn configure_sound_validates_presets_and_custom_path() {
+        configure_sound(Some("bell"), Some("C:\\sounds\\ding.wav"));
+        {
+            let cfg = SOUND_CONFIG.lock();
+            assert_eq!(cfg.preset, "bell");
+            assert_eq!(cfg.custom_path.as_deref(), Some("C:\\sounds\\ding.wav"));
+        }
+        configure_sound(Some("invalid_preset"), Some("   "));
+        {
+            let cfg = SOUND_CONFIG.lock();
+            assert_eq!(cfg.preset, "chime");
+            assert!(cfg.custom_path.is_none());
+        }
     }
 }

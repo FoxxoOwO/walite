@@ -7,6 +7,15 @@ are also published on the [Releases page](https://github.com/FoxxoOwO/walite/rel
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-17
+
+### Added
+- **Customizable Notification Sounds**: Choose between built-in notification sound presets (*Default*, *Chime*, *Pop*, *Ping*, *Bell*, *Silent*) or select a custom audio file from *Settings → Notifications*, complete with a live preview button.
+- **Windows Installer**: Added an Inno Setup installer script (`installer/walite.iss`) and now ship `WaLite-v1.0.1-windows-x86_64-setup.exe` alongside the portable ZIP archive.
+
+### Fixed
+- **Stale Chat Drafts After Sending**: Fixed a race condition where sending a message within 350 ms of the last keystroke could leave the sent text behind as a chat draft (`_draftTimer` is now cancelled and cleared on submit, and `send_media` clears any active draft as well).
+
 ## [1.0.0] - 2026-11-16
 
 First **1.0.0** release under the **WaLite** brand, featuring the Flutter desktop

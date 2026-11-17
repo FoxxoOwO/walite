@@ -59,6 +59,10 @@ pub async fn run(port: u16) -> Result<()> {
     crate::notifications::set_window_focused(false);
     let loaded = crate::storage::load_state().await.unwrap_or_default();
     crate::i18n::set_language(loaded.preferences.language);
+    crate::notifications::configure_sound(
+        loaded.preferences.notification_sound.as_deref(),
+        loaded.preferences.custom_sound_path.as_deref(),
+    );
     let state: SharedState = Arc::new(RwLock::new(loaded));
     let backend = Arc::new(crate::backend::spawn_backend(state.clone()).await?);
     crate::updater::spawn_periodic_check(state.clone());
@@ -250,11 +254,13 @@ fn handle_command(raw: &str, backend: &BackendHandle, reply_tx: &UnboundedSender
                 let mut s = backend.state.write();
                 let canon = s.canonical_jid(&jid);
                 if text.trim().is_empty() {
-                    s.drafts.remove(&canon);
+                    if s.drafts.remove(&canon).is_some() {
+                        s.dirty = true;
+                    }
                 } else {
                     s.drafts.insert(canon, text);
+                    s.dirty = true;
                 }
-                s.dirty = true;
             }
         }
         Some("typing") => {
@@ -273,7 +279,9 @@ fn handle_command(raw: &str, backend: &BackendHandle, reply_tx: &UnboundedSender
                     {
                         let mut s = backend.state.write();
                         let canon = s.canonical_jid(&jid);
-                        s.drafts.remove(&canon);
+                        if s.drafts.remove(&canon).is_some() {
+                            s.dirty = true;
+                        }
                     }
                     let _ = backend.send_command(Command::SendText {
                         to: jid,
@@ -338,6 +346,13 @@ fn handle_command(raw: &str, backend: &BackendHandle, reply_tx: &UnboundedSender
             if let (Some(chat), Some(path)) =
                 (jid_field(&value, "chat"), value["path"].as_str())
             {
+                {
+                    let mut s = backend.state.write();
+                    let canon = s.canonical_jid(&chat);
+                    if s.drafts.remove(&canon).is_some() {
+                        s.dirty = true;
+                    }
+                }
                 let _ = backend.send_command(Command::SendMedia {
                     chat_jid: chat,
                     file_path: std::path::PathBuf::from(path),
@@ -1047,6 +1062,11 @@ fn handle_command(raw: &str, backend: &BackendHandle, reply_tx: &UnboundedSender
             );
             crate::notifications::play_sound();
         }
+        Some("preview_sound") => {
+            let preset = value["preset"].as_str();
+            let path = value["path"].as_str();
+            crate::notifications::play_sound_preview(preset, path);
+        }
         Some("media_stats") => {
             let reply = compute_media_stats_json(&backend.state, None);
             let _ = reply_tx.send(reply.to_string());
@@ -1181,6 +1201,68 @@ fn handle_command(raw: &str, backend: &BackendHandle, reply_tx: &UnboundedSender
                             }
                         }
                         "chat_wallpaper_doodles" => assign_bool(&mut p.chat_wallpaper_doodles, v),
+                        "notification_sound" => {
+                            if v.is_null() {
+                                p.notification_sound = None;
+                                crate::notifications::configure_sound(
+                                    None,
+                                    p.custom_sound_path.as_deref(),
+                                );
+                                true
+                            } else if let Some(preset) = v.as_str() {
+                                let trimmed = preset.trim();
+                                if crate::notifications::is_valid_sound_preset(trimmed) {
+                                    p.notification_sound = Some(trimmed.to_string());
+                                    crate::notifications::configure_sound(
+                                        p.notification_sound.as_deref(),
+                                        p.custom_sound_path.as_deref(),
+                                    );
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        }
+                        "custom_sound_path" => {
+                            if v.is_null() {
+                                p.custom_sound_path = None;
+                                if p.notification_sound.as_deref() == Some("custom") {
+                                    p.notification_sound = Some("chime".to_string());
+                                }
+                                crate::notifications::configure_sound(
+                                    p.notification_sound.as_deref(),
+                                    None,
+                                );
+                                true
+                            } else if let Some(path_str) = v.as_str() {
+                                let trimmed = path_str.trim();
+                                if trimmed.is_empty() {
+                                    p.custom_sound_path = None;
+                                    if p.notification_sound.as_deref() == Some("custom") {
+                                        p.notification_sound = Some("chime".to_string());
+                                    }
+                                    crate::notifications::configure_sound(
+                                        p.notification_sound.as_deref(),
+                                        None,
+                                    );
+                                    true
+                                } else if std::path::Path::new(trimmed).is_file() {
+                                    p.custom_sound_path = Some(trimmed.to_string());
+                                    p.notification_sound = Some("custom".to_string());
+                                    crate::notifications::configure_sound(
+                                        p.notification_sound.as_deref(),
+                                        p.custom_sound_path.as_deref(),
+                                    );
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        }
                         _ => false,
                     }
                 }
@@ -1354,6 +1436,8 @@ fn prefs_json(s: &crate::state::AppState) -> Value {
         "chat_wallpaper_color": p.chat_wallpaper_color,
         "chat_wallpaper_path": p.chat_wallpaper_path,
         "chat_wallpaper_doodles": p.chat_wallpaper_doodles,
+        "notification_sound": p.notification_sound,
+        "custom_sound_path": p.custom_sound_path,
     })
 }
 

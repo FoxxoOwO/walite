@@ -273,6 +273,12 @@ void main() {
     expect(find.text('Barevné schéma'), findsOneWidget);
     expect(find.text('Pozadí konverzace'), findsOneWidget);
 
+    await tester.tap(find.text('Oznámení'));
+    await tester.pump();
+    expect(find.text('Zvuk upozornění'), findsOneWidget);
+    expect(find.text('Bublina (Pop)'), findsOneWidget);
+    expect(find.text('Vybrat vlastní zvuk…'), findsOneWidget);
+
     await tester.tap(find.text('O aplikaci a data'));
     await tester.pump();
     expect(find.text('Klávesové zkratky'), findsOneWidget);
@@ -441,4 +447,91 @@ void main() {
     expect(find.text('S reakcemi'), findsOneWidget);
     expect(find.text('Hvězdičkou'), findsOneWidget);
   });
+
+  testWidgets('sending a message within 350ms does not leave a stale draft',
+      (tester) async {
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    final bridge = _RecordingBridge(18788);
+    addTearDown(bridge.dispose);
+
+    final snapshot = Snapshot.fromJson({
+      'type': 'snapshot',
+      'self': '420111222333@s.whatsapp.net',
+      'self_name': 'Teresa',
+      'connection': {'kind': 'connected'},
+      'selected': '420777888999@s.whatsapp.net',
+      'chats': [
+        {
+          'jid': '420777888999@s.whatsapp.net',
+          'name': 'Petr',
+          'unread': 0,
+          'group': false,
+        },
+      ],
+      'messages': [],
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: HomePage(
+          bridge: bridge,
+          snapshot: snapshot,
+          linked: true,
+          palette: WaPalette.whatsappDark,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.enterText(find.byType(TextField).last, 'Ahoj světe');
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.tap(find.byIcon(Icons.send).last);
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(
+      bridge.sentTexts,
+      [('420777888999@s.whatsapp.net', 'Ahoj světe')],
+    );
+    expect(
+      bridge.savedDrafts.where((d) => d.$2.isNotEmpty),
+      isEmpty,
+    );
+    expect(
+      bridge.savedDrafts.lastOrNull,
+      ('420777888999@s.whatsapp.net', ''),
+    );
+  });
+}
+
+class _RecordingBridge extends Bridge {
+  _RecordingBridge(super.port);
+
+  final List<(String, String)> savedDrafts = [];
+  final List<(String, String)> sentTexts = [];
+
+  @override
+  void saveDraft(String chat, String text) {
+    savedDrafts.add((chat, text));
+  }
+
+  @override
+  void sendText(
+    String jid,
+    String text, {
+    String? reply,
+    List<String> mentions = const [],
+  }) {
+    sentTexts.add((jid, text));
+  }
+
+  @override
+  void sendTyping(String chat, bool composing) {}
 }

@@ -425,6 +425,12 @@ pub struct UserPreferences {
     /// Zobrazovat jemný WhatsApp vzorek na pozadí konverzace.
     #[serde(default = "default_true")]
     pub chat_wallpaper_doodles: bool,
+    /// Vestavěný zvuk upozornění ("chime", "pop", "bell", "soft", "triple", "custom").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_sound: Option<String>,
+    /// Cesta k vlastnímu zvukovému souboru pro oznámení (.wav, .mp3, .ogg, .flac, .m4a).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_sound_path: Option<String>,
 }
 
 impl Default for UserPreferences {
@@ -449,6 +455,8 @@ impl Default for UserPreferences {
             chat_wallpaper_color: None,
             chat_wallpaper_path: None,
             chat_wallpaper_doodles: true,
+            notification_sound: None,
+            custom_sound_path: None,
         }
     }
 }
