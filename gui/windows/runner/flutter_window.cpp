@@ -324,7 +324,8 @@ void FlutterWindow::EnsureBackendRunning() {
   backend_job_ = CreateJobObjectW(nullptr, nullptr);
   if (backend_job_) {
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli{};
-    jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    jeli.BasicLimitInformation.LimitFlags =
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
     SetInformationJobObject(backend_job_, JobObjectExtendedLimitInformation,
                             &jeli, sizeof(jeli));
   }

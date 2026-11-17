@@ -212,11 +212,16 @@ fn windows_update_script(pid: u32, dir: &Path, exe: &Path, archive: &Path) -> St
         .unwrap_or_else(|| "warust.exe".to_string());
     format!(
         "@echo off\r\n\
+         chcp 65001 >nul\r\n\
          :wait\r\n\
          tasklist /FI \"PID eq {pid}\" | find \"{pid}\" >nul\r\n\
          if not errorlevel 1 (\r\n\
          \x20 timeout /t 1 /nobreak >nul\r\n\
          \x20 goto wait\r\n\
+         )\r\n\
+         if exist \"%DIR%\\warust_gui.exe\" (\r\n\
+         \x20 taskkill /IM warust_gui.exe /F >nul 2>&1\r\n\
+         \x20 timeout /t 1 /nobreak >nul\r\n\
          )\r\n\
          set \"LOG=%TEMP%\\warust-update.log\"\r\n\
          set \"ZIP={zip}\"\r\n\
@@ -229,14 +234,17 @@ fn windows_update_script(pid: u32, dir: &Path, exe: &Path, archive: &Path) -> St
          if exist \"%TAR%\" \"%TAR%\" -xf \"%ZIP%\" -C \"%STAGE%\" >>\"%LOG%\" 2>&1\r\n\
          if not exist \"%STAGE%\\{exe_name}\" powershell -NoProfile -ExecutionPolicy Bypass -Command \"Expand-Archive -LiteralPath '%ZIP%' -DestinationPath '%STAGE%' -Force\" >>\"%LOG%\" 2>&1\r\n\
          if exist \"%STAGE%\\{exe_name}\" (\r\n\
-         \x20 copy /y \"%STAGE%\\{exe_name}\" \"%DIR%\\{exe_name}\" >>\"%LOG%\" 2>&1\r\n\
-         \x20 for %%F in (ffmpeg.exe ffprobe.exe FFMPEG-NOTICE.txt) do if exist \"%STAGE%\\%%F\" copy /y \"%STAGE%\\%%F\" \"%DIR%\\%%F\" >>\"%LOG%\" 2>&1\r\n\
+         \x20 xcopy \"%STAGE%\\*\" \"%DIR%\\\" /E /Y /I /Q >>\"%LOG%\" 2>&1\r\n\
          \x20 rmdir /s /q \"%STAGE%\"\r\n\
          ) else (\r\n\
          \x20 echo rozbaleni selhalo, zustava stara verze >>\"%LOG%\"\r\n\
          )\r\n\
          del \"%ZIP%\"\r\n\
-         start \"\" \"%DIR%\\{exe_name}\"\r\n\
+         if exist \"%DIR%\\warust_gui.exe\" (\r\n\
+         \x20 start \"\" \"%DIR%\\warust_gui.exe\"\r\n\
+         ) else (\r\n\
+         \x20 start \"\" \"%DIR%\\{exe_name}\"\r\n\
+         )\r\n\
          del \"%~f0\"\r\n",
         pid = pid,
         dir = dir.display(),
@@ -392,11 +400,19 @@ pub fn install_and_restart(archive: &Path) -> Result<()> {
         )?;
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
         std::process::Command::new("cmd")
             .arg("/C")
             .arg(&script)
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()?;
+            .creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)
+            .spawn()
+            .or_else(|_| {
+                std::process::Command::new("cmd")
+                    .arg("/C")
+                    .arg(&script)
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn()
+            })?;
     }
 
     #[cfg(not(windows))]
@@ -515,20 +531,25 @@ mod tests {
     fn windows_script_extracts_with_the_system_tar() {
         let script = windows_update_script(
             4242,
-            Path::new(r"C:\Apps\Warust"),
-            Path::new(r"C:\Apps\Warust\warust.exe"),
+            Path::new(r"C:\Apps\Stažené soubory\WaLite"),
+            Path::new(r"C:\Apps\Stažené soubory\WaLite\warust.exe"),
             Path::new(r"C:\Temp\warust-v0.3.1-windows-x86_64.zip"),
         );
+        assert!(script.contains("chcp 65001 >nul"), "{script}");
         assert!(
             script.contains(r"%SystemRoot%\System32\tar.exe"),
             "{script}"
         );
         assert!(script.contains("Expand-Archive"), "{script}");
         assert!(
-            script.contains(r#"copy /y "%STAGE%\warust.exe" "%DIR%\warust.exe""#),
+            script.contains(r#"xcopy "%STAGE%\*" "%DIR%\" /E /Y /I /Q"#),
             "{script}"
         );
         assert!(script.contains("PID eq 4242"), "{script}");
+        assert!(
+            script.contains(r#"start "" "%DIR%\warust_gui.exe""#),
+            "{script}"
+        );
         assert!(
             script.contains(r#"start "" "%DIR%\warust.exe""#),
             "{script}"
