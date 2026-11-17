@@ -1,5 +1,6 @@
 import 'dart:ui';
 
+import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:warust_gui/bridge.dart';
@@ -509,6 +510,76 @@ void main() {
       ('420777888999@s.whatsapp.net', ''),
     );
   });
+
+  testWidgets('Ctrl+V pastes text into the composer and still checks image clipboard',
+      (tester) async {
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.getData') {
+          return const <String, dynamic>{'text': 'vložený text'};
+        }
+        return null;
+      },
+    );
+    addTearDown(() {
+      tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, null);
+    });
+
+    final bridge = _RecordingBridge(18789);
+    addTearDown(bridge.dispose);
+
+    final snapshot = Snapshot.fromJson({
+      'type': 'snapshot',
+      'self': '420111222333@s.whatsapp.net',
+      'self_name': 'Teresa',
+      'connection': {'kind': 'connected'},
+      'selected': '420777888999@s.whatsapp.net',
+      'chats': [
+        {
+          'jid': '420777888999@s.whatsapp.net',
+          'name': 'Petr',
+          'unread': 0,
+          'group': false,
+        },
+      ],
+      'messages': [],
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: HomePage(
+          bridge: bridge,
+          snapshot: snapshot,
+          linked: true,
+          palette: WaPalette.whatsappDark,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.byType(TextField).last);
+    await tester.pump();
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+
+    final field = tester.widget<TextField>(find.byType(TextField).last);
+    expect(field.controller?.text, 'vložený text');
+    expect(bridge.pasteClipboardImageCalls, 1);
+  });
 }
 
 class _RecordingBridge extends Bridge {
@@ -516,10 +587,16 @@ class _RecordingBridge extends Bridge {
 
   final List<(String, String)> savedDrafts = [];
   final List<(String, String)> sentTexts = [];
+  int pasteClipboardImageCalls = 0;
 
   @override
   void saveDraft(String chat, String text) {
     savedDrafts.add((chat, text));
+  }
+
+  @override
+  void pasteClipboardImage() {
+    pasteClipboardImageCalls += 1;
   }
 
   @override

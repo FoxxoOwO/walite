@@ -2281,15 +2281,17 @@ class ConversationViewState extends State<ConversationView> {
           tooltip: tr.t('Vytvořit anketu', 'Create poll'),
         ),
         Expanded(
-          child: CallbackShortcuts(
-            bindings: {
-              const SingleActivator(LogicalKeyboardKey.keyV, control: true):
-                  () => widget.bridge.pasteClipboardImage(),
-            },
-            child: Focus(
-              onKeyEvent: (_, evt) {
-                if (evt is KeyDownEvent &&
-                    evt.logicalKey == LogicalKeyboardKey.enter) {
+          child: Focus(
+            onKeyEvent: (_, evt) {
+              if (evt is KeyDownEvent) {
+                if (evt.logicalKey == LogicalKeyboardKey.keyV &&
+                    HardwareKeyboard.instance.isControlPressed &&
+                    !HardwareKeyboard.instance.isAltPressed) {
+                  widget.bridge.pasteClipboardImage();
+                  // Let TextField handle text paste via the default Ctrl+V action.
+                  return KeyEventResult.ignored;
+                }
+                if (evt.logicalKey == LogicalKeyboardKey.enter) {
                   final shift = HardwareKeyboard.instance.isShiftPressed;
                   final ctrl = HardwareKeyboard.instance.isControlPressed;
                   if (s.prefs.enterIsSend && !shift) {
@@ -2301,31 +2303,31 @@ class ConversationViewState extends State<ConversationView> {
                     return KeyEventResult.handled;
                   }
                 }
-                return KeyEventResult.ignored;
-              },
-              child: TextField(
-                controller: _composerCtrl,
-                focusNode: _composerFocus,
-                minLines: 1,
-                maxLines: 5,
-                onChanged: (txt) => _onComposerChanged(chatJid, txt),
-                style: const TextStyle(fontSize: 14.5),
-                decoration: InputDecoration(
-                  isDense: true,
-                  filled: true,
-                  fillColor: p.surfaceElevated,
-                  hintText: _editingMessageId != null
-                      ? tr.t('Upravit zprávu…', 'Edit message…')
-                      : _pendingAttachmentPath != null
-                          ? tr.t('Přidat popisek…', 'Add caption…')
-                          : tr.t('Napište zprávu', 'Type a message'),
-                  hintStyle: const TextStyle(color: WaPalette.textSecondary),
-                  contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 10),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide.none,
-                  ),
+              }
+              return KeyEventResult.ignored;
+            },
+            child: TextField(
+              controller: _composerCtrl,
+              focusNode: _composerFocus,
+              minLines: 1,
+              maxLines: 5,
+              onChanged: (txt) => _onComposerChanged(chatJid, txt),
+              style: const TextStyle(fontSize: 14.5),
+              decoration: InputDecoration(
+                isDense: true,
+                filled: true,
+                fillColor: p.surfaceElevated,
+                hintText: _editingMessageId != null
+                    ? tr.t('Upravit zprávu…', 'Edit message…')
+                    : _pendingAttachmentPath != null
+                        ? tr.t('Přidat popisek…', 'Add caption…')
+                        : tr.t('Napište zprávu', 'Type a message'),
+                hintStyle: const TextStyle(color: WaPalette.textSecondary),
+                contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 14, vertical: 10),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide.none,
                 ),
               ),
             ),
