@@ -205,51 +205,56 @@ fn save_body_to_file<R: std::io::Read>(mut reader: R, path: &Path) -> Result<u64
 /// zip, takže s ním tiše selhal a aplikace se znovu otevřela ve staré verzi.
 /// Když bsdtar chybí (Windows starší než 1803), rozbaluje PowerShell.
 #[cfg(windows)]
+fn ps_single_quote(value: &Path) -> String {
+    value.to_string_lossy().replace('\'', "''")
+}
+
+#[cfg(windows)]
 fn windows_update_script(pid: u32, dir: &Path, exe: &Path, archive: &Path) -> String {
     let exe_name = exe
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "warust.exe".to_string());
+    let exe_name_escaped = exe_name.replace('\'', "''");
     format!(
-        "@echo off\r\n\
-         chcp 65001 >nul\r\n\
-         :wait\r\n\
-         tasklist /FI \"PID eq {pid}\" | find \"{pid}\" >nul\r\n\
-         if not errorlevel 1 (\r\n\
-         \x20 timeout /t 1 /nobreak >nul\r\n\
-         \x20 goto wait\r\n\
-         )\r\n\
-         if exist \"%DIR%\\warust_gui.exe\" (\r\n\
-         \x20 taskkill /IM warust_gui.exe /F >nul 2>&1\r\n\
-         \x20 timeout /t 1 /nobreak >nul\r\n\
-         )\r\n\
-         set \"LOG=%TEMP%\\warust-update.log\"\r\n\
-         set \"ZIP={zip}\"\r\n\
-         set \"DIR={dir}\"\r\n\
-         set \"STAGE=%TEMP%\\warust-unpack\"\r\n\
-         echo --- aktualizace %DATE% %TIME% >>\"%LOG%\"\r\n\
-         if exist \"%STAGE%\" rmdir /s /q \"%STAGE%\"\r\n\
-         mkdir \"%STAGE%\"\r\n\
-         set \"TAR=%SystemRoot%\\System32\\tar.exe\"\r\n\
-         if exist \"%TAR%\" \"%TAR%\" -xf \"%ZIP%\" -C \"%STAGE%\" >>\"%LOG%\" 2>&1\r\n\
-         if not exist \"%STAGE%\\{exe_name}\" powershell -NoProfile -ExecutionPolicy Bypass -Command \"Expand-Archive -LiteralPath '%ZIP%' -DestinationPath '%STAGE%' -Force\" >>\"%LOG%\" 2>&1\r\n\
-         if exist \"%STAGE%\\{exe_name}\" (\r\n\
-         \x20 xcopy \"%STAGE%\\*\" \"%DIR%\\\" /E /Y /I /Q >>\"%LOG%\" 2>&1\r\n\
-         \x20 rmdir /s /q \"%STAGE%\"\r\n\
-         ) else (\r\n\
-         \x20 echo rozbaleni selhalo, zustava stara verze >>\"%LOG%\"\r\n\
-         )\r\n\
-         del \"%ZIP%\"\r\n\
-         if exist \"%DIR%\\warust_gui.exe\" (\r\n\
-         \x20 start \"\" \"%DIR%\\warust_gui.exe\"\r\n\
-         ) else (\r\n\
-         \x20 start \"\" \"%DIR%\\{exe_name}\"\r\n\
-         )\r\n\
-         del \"%~f0\"\r\n",
+        "\u{FEFF}$ErrorActionPreference = 'Continue'\r\n\
+         $log = Join-Path $env:TEMP 'warust-update.log'\r\n\
+         $zip = '{zip}'\r\n\
+         $dir = '{dir}'\r\n\
+         $exeName = '{exe_name}'\r\n\
+         $stage = Join-Path $env:TEMP 'warust-unpack'\r\n\
+         $p = Get-Process -Id {pid} -ErrorAction SilentlyContinue\r\n\
+         if ($p) {{ $p.WaitForExit() }}\r\n\
+         $guiProc = Get-Process -Name 'warust_gui' -ErrorAction SilentlyContinue | Where-Object {{\r\n\
+         \x20 try {{ $_.Path -and ([IO.Path]::GetDirectoryName($_.Path).TrimEnd('\\') -ieq $dir.TrimEnd('\\')) }} catch {{ $false }}\r\n\
+         }}\r\n\
+         if ($guiProc) {{\r\n\
+         \x20 $guiProc | Stop-Process -Force -ErrorAction SilentlyContinue\r\n\
+         \x20 Start-Sleep -Milliseconds 500\r\n\
+         }}\r\n\
+         \"--- aktualizace $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')\" | Out-File -FilePath $log -Append -Encoding utf8\r\n\
+         if (Test-Path -LiteralPath $stage) {{ Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }}\r\n\
+         New-Item -ItemType Directory -Force -Path $stage | Out-Null\r\n\
+         $tar = Join-Path $env:SystemRoot 'System32\\tar.exe'\r\n\
+         if (Test-Path -LiteralPath $tar) {{ & $tar -xf $zip -C $stage *>> $log }}\r\n\
+         if (-not (Test-Path -LiteralPath (Join-Path $stage $exeName))) {{\r\n\
+         \x20 Expand-Archive -LiteralPath $zip -DestinationPath $stage -Force *>> $log\r\n\
+         }}\r\n\
+         if (Test-Path -LiteralPath (Join-Path $stage $exeName)) {{\r\n\
+         \x20 Copy-Item -Path (Join-Path $stage '*') -Destination $dir -Recurse -Force *>> $log\r\n\
+         \x20 Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue\r\n\
+         }} else {{\r\n\
+         \x20 'rozbaleni selhalo, zustava stara verze' | Out-File -FilePath $log -Append -Encoding utf8\r\n\
+         }}\r\n\
+         Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue\r\n\
+         $guiExe = Join-Path $dir 'warust_gui.exe'\r\n\
+         $launch = if (Test-Path -LiteralPath $guiExe) {{ $guiExe }} else {{ Join-Path $dir $exeName }}\r\n\
+         Start-Process -FilePath $launch -WorkingDirectory $dir\r\n\
+         Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\r\n",
         pid = pid,
-        dir = dir.display(),
-        zip = archive.display(),
-        exe_name = exe_name,
+        dir = ps_single_quote(dir),
+        zip = ps_single_quote(archive),
+        exe_name = exe_name_escaped,
     )
 }
 
@@ -393,7 +398,7 @@ pub fn install_and_restart(archive: &Path) -> Result<()> {
 
     #[cfg(windows)]
     {
-        let script = std::env::temp_dir().join("warust-update.cmd");
+        let script = std::env::temp_dir().join("warust-update.ps1");
         std::fs::write(
             &script,
             windows_update_script(std::process::id(), &dir, &exe, archive),
@@ -401,14 +406,22 @@ pub fn install_and_restart(archive: &Path) -> Result<()> {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-        std::process::Command::new("cmd")
-            .arg("/C")
+        let ps_args = [
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+        ];
+        std::process::Command::new("powershell.exe")
+            .args(ps_args)
             .arg(&script)
             .creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)
             .spawn()
             .or_else(|_| {
-                std::process::Command::new("cmd")
-                    .arg("/C")
+                std::process::Command::new("powershell.exe")
+                    .args(ps_args)
                     .arg(&script)
                     .creation_flags(CREATE_NO_WINDOW)
                     .spawn()
@@ -535,25 +548,13 @@ mod tests {
             Path::new(r"C:\Apps\Stažené soubory\WaLite\warust.exe"),
             Path::new(r"C:\Temp\warust-v0.3.1-windows-x86_64.zip"),
         );
-        assert!(script.contains("chcp 65001 >nul"), "{script}");
-        assert!(
-            script.contains(r"%SystemRoot%\System32\tar.exe"),
-            "{script}"
-        );
+        assert!(script.starts_with('\u{FEFF}'), "{script}");
+        assert!(script.contains("tar.exe"), "{script}");
         assert!(script.contains("Expand-Archive"), "{script}");
-        assert!(
-            script.contains(r#"xcopy "%STAGE%\*" "%DIR%\" /E /Y /I /Q"#),
-            "{script}"
-        );
-        assert!(script.contains("PID eq 4242"), "{script}");
-        assert!(
-            script.contains(r#"start "" "%DIR%\warust_gui.exe""#),
-            "{script}"
-        );
-        assert!(
-            script.contains(r#"start "" "%DIR%\warust.exe""#),
-            "{script}"
-        );
+        assert!(script.contains("Copy-Item -Path"), "{script}");
+        assert!(script.contains("Get-Process -Id 4242"), "{script}");
+        assert!(script.contains("warust_gui.exe"), "{script}");
+        assert!(script.contains("Start-Process -FilePath $launch"), "{script}");
         // Stará verze zůstává, když rozbalení selže.
         assert!(script.contains("zustava stara verze"), "{script}");
     }
