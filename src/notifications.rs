@@ -303,37 +303,69 @@ fn play_sound_blocking(preset: &str, custom_path: Option<&str>) -> Result<(), St
     }
 
     let note = |freq: f32, millis: u64, amp: f32| {
-        rodio::source::SineWave::new(freq)
-            .take_duration(Duration::from_millis(millis))
-            .amplify(amp)
-            .fade_in(Duration::from_millis(4))
+        rodio::buffer::SamplesBuffer::new(
+            std::num::NonZero::new(1).unwrap(),
+            std::num::NonZero::new(48_000).unwrap(),
+            generate_tone_samples(freq, millis, amp),
+        )
     };
 
     match preset {
         "pop" => {
-            player.append(note(520.0, 45, 0.24));
-            player.append(note(980.0, 60, 0.26));
+            player.append(note(520.0, 50, 0.24));
+            player.append(note(980.0, 70, 0.26));
         }
         "bell" => {
-            player.append(note(1046.5, 110, 0.24));
-            player.append(note(1568.0, 180, 0.20));
+            player.append(note(1046.5, 115, 0.24));
+            player.append(note(1568.0, 200, 0.20));
         }
         "soft" => {
-            player.append(note(659.25, 80, 0.16));
-            player.append(note(784.0, 110, 0.14));
+            player.append(note(659.25, 85, 0.16));
+            player.append(note(784.0, 125, 0.14));
         }
         "triple" => {
-            player.append(note(659.25, 70, 0.22));
-            player.append(note(880.0, 70, 0.24));
-            player.append(note(1318.5, 110, 0.24));
+            player.append(note(659.25, 75, 0.22));
+            player.append(note(880.0, 75, 0.24));
+            player.append(note(1318.5, 125, 0.24));
         }
         _ => {
-            player.append(note(880.0, 90, 0.25));
-            player.append(note(1174.7, 120, 0.25));
+            player.append(note(880.0, 95, 0.25));
+            player.append(note(1174.7, 135, 0.25));
         }
     }
     player.sleep_until_end();
+    // Let the OS audio backend finish draining its hardware buffer before dropping the sink.
+    std::thread::sleep(Duration::from_millis(50));
     Ok(())
+}
+
+/// Generates a 48 kHz mono sine tone with raised-cosine attack and release
+/// envelopes so consecutive notes and stream ends never click or pop.
+fn generate_tone_samples(freq: f32, millis: u64, amp: f32) -> Vec<f32> {
+    const SAMPLE_RATE: usize = 48_000;
+    let total = (SAMPLE_RATE * millis as usize) / 1000;
+    if total == 0 {
+        return Vec::new();
+    }
+    let attack = (SAMPLE_RATE * 8 / 1000).min(total / 3).max(1);
+    let release = (SAMPLE_RATE * 28 / 1000).min(total / 2).max(1);
+    let release_start = total.saturating_sub(release);
+
+    (0..total)
+        .map(|i| {
+            let t = i as f32 / SAMPLE_RATE as f32;
+            let wave = (2.0 * std::f32::consts::PI * freq * t).sin();
+            let env = if i < attack {
+                0.5 * (1.0 - (std::f32::consts::PI * i as f32 / attack as f32).cos())
+            } else if i >= release_start {
+                let pos = (i - release_start + 1) as f32 / release as f32;
+                0.5 * (1.0 + (std::f32::consts::PI * pos).cos())
+            } else {
+                1.0
+            };
+            wave * amp * env
+        })
+        .collect()
 }
 
 /// Message body used in toasts: keep it short and on one line.
@@ -406,5 +438,18 @@ mod tests {
             assert_eq!(cfg.preset, "chime");
             assert!(cfg.custom_path.is_none());
         }
+    }
+
+    #[test]
+    fn tone_samples_start_and_end_at_zero_without_clicks() {
+        let samples = generate_tone_samples(880.0, 95, 0.25);
+        assert_eq!(samples.len(), 4560);
+        assert!(samples[0].abs() < 1e-6);
+        assert!(samples.last().unwrap().abs() < 1e-6);
+        let max_step = samples
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(max_step < 0.04, "unexpected waveform jump: {max_step}");
     }
 }
