@@ -1147,7 +1147,10 @@ impl AppState {
         })
     }
 
-    pub fn add_message(&mut self, mut msg: Message) {
+    /// Inserts `msg` into its canonical chat timeline, folding reaction-only text
+    /// onto an existing message and deduplicating by message ID.
+    /// Returns `true` when a new message bubble was inserted.
+    pub fn add_message(&mut self, mut msg: Message) -> bool {
         self.dirty = true;
         let canon_chat_jid = self.canonical_jid(&msg.chat_jid);
         msg.chat_jid = canon_chat_jid.clone();
@@ -1161,7 +1164,7 @@ impl AppState {
                     emoji: msg.text.clone(),
                     sender: msg.sender_jid,
                 });
-                return;
+                return false;
             }
         }
 
@@ -1173,13 +1176,15 @@ impl AppState {
             }
         }
 
-        if let Some(pos) = msgs.iter().position(|m| m.id == msg.id) {
+        let inserted = if let Some(pos) = msgs.iter().position(|m| m.id == msg.id) {
             msgs[pos].status = msg.status;
+            false
         } else {
             // Keep messages sorted by timestamp
             let idx = msgs.partition_point(|m| m.timestamp <= msg.timestamp);
             msgs.insert(idx, msg);
-        }
+            true
+        };
 
         // Always update chat preview from true latest non-reaction message on canonical and any mapped LID chat
         let preview = msgs.iter().rev().find(|m| !is_reaction_only(&m.text)).map(|latest| MessagePreview {
@@ -1207,6 +1212,8 @@ impl AppState {
                 }
             }
         }
+
+        inserted
     }
 
     pub fn add_messages_batch(&mut self, new_msgs: Vec<Message>) {
@@ -2919,5 +2926,60 @@ mod selection_tests {
             .map(|m| m.id.as_str())
             .collect();
         assert_eq!(ids, vec!["M1", "M2", "M3"]);
+    }
+
+    #[test]
+    fn add_message_returns_false_for_duplicates_and_reaction_only() {
+        let mut state = AppState::default();
+        let chat: Jid = "420111222333@s.whatsapp.net".parse().unwrap();
+        let sender: Jid = "420999888777@s.whatsapp.net".parse().unwrap();
+        let ts = Utc::now();
+
+        let msg = Message::new_text(
+            "MSG_1".into(),
+            chat.clone(),
+            sender.clone(),
+            "Ahoj".into(),
+            ts,
+            false,
+            MessageStatus::Sent,
+            None,
+            None,
+        );
+        assert!(state.add_message(msg));
+
+        let dup = Message::new_text(
+            "MSG_1".into(),
+            chat.clone(),
+            sender.clone(),
+            "Ahoj".into(),
+            ts,
+            false,
+            MessageStatus::Delivered,
+            None,
+            None,
+        );
+        assert!(!state.add_message(dup));
+        assert_eq!(state.messages.get(&chat).unwrap().len(), 1);
+        assert_eq!(
+            state.messages.get(&chat).unwrap()[0].status,
+            MessageStatus::Delivered
+        );
+
+        let react = Message::new_text(
+            "REACT_1".into(),
+            chat.clone(),
+            sender.clone(),
+            "👍".into(),
+            ts + chrono::Duration::seconds(1),
+            false,
+            MessageStatus::Delivered,
+            None,
+            None,
+        );
+        assert!(!state.add_message(react));
+        assert_eq!(state.messages.get(&chat).unwrap().len(), 1);
+        assert_eq!(state.messages.get(&chat).unwrap()[0].reactions.len(), 1);
+        assert_eq!(state.messages.get(&chat).unwrap()[0].reactions[0].emoji, "👍");
     }
 }

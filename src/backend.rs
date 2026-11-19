@@ -553,21 +553,7 @@ async fn create_and_spawn_bot(
                 async {}
             }
         })
-        .on_message({
-            let state = state_clone.clone();
-            let tx_status = tx_status_clone.clone();
-            move |ctx| {
-                let state = state.clone();
-                let tx_status = tx_status.clone();
-                // Clone needed fields to avoid lifetime issues
-                let info = ctx.info.clone();
-                let message = (*ctx.message).clone();
-                let client = ctx.client.clone();
-                async move {
-                    handle_incoming_message(info, message, client, state, tx_status).await;
-                }
-            }
-        })
+        // Incoming messages arrive via `Event::Messages(batch)` in `handle_event`.
         .on_event({
             let state = state_clone.clone();
             let tx_status = tx_status_clone.clone();
@@ -1163,7 +1149,7 @@ async fn handle_incoming_message(
     }
 
     // Update state
-    {
+    let inserted = {
         let mut s = state.write();
         let push_name = info.push_name.to_string();
         let has_real_push_name = crate::util::is_real_name(&push_name);
@@ -1209,23 +1195,24 @@ async fn handle_incoming_message(
         // Add message
         let mut msg_canon = msg;
         msg_canon.chat_jid = canon_chat_jid.clone();
-        s.add_message(msg_canon);
+        let inserted = s.add_message(msg_canon);
         s.consolidate_canonical_chats();
 
-        // Bump unread badge for messages the user has not looked at yet
-        if !from_me && s.selected_chat.as_ref() != Some(&canon_chat_jid) {
+        // Bump unread badge for newly inserted messages the user has not looked at yet
+        if inserted && !from_me && s.selected_chat.as_ref() != Some(&canon_chat_jid) {
             if let Some(chat) = s.chats.get_mut(&canon_chat_jid) {
                 chat.unread_count = chat.unread_count.saturating_add(1);
             }
         }
-    }
+        inserted
+    };
     
     // A message that names us deserves a louder ping than a plain one.
-    let mentioned_me = !from_me && message_mentions_me(&message, &state.read());
+    let mentioned_me = inserted && !from_me && message_mentions_me(&message, &state.read());
 
     // Desktop notification / chime for messages the user is not looking at.
     // Muted chats stay silent; previews honour the privacy preference.
-    if !from_me {
+    if inserted && !from_me {
         let (title, muted, desktop, sound, show_previews) = {
             let s = state.read();
             let canon = if info.source.is_group {
