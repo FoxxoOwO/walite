@@ -156,7 +156,7 @@ jobs:
           (cd "$gui_rel" && 7z a "../../../../../../dist/WaLite-${VERSION}-${{ matrix.asset_suffix }}" .)
           cp "dist/WaLite-${VERSION}-${{ matrix.asset_suffix }}" "dist/warust-${VERSION}-${{ matrix.asset_suffix }}"
           ver="${VERSION#v}"
-          "C:/Program Files (x86)/Inno Setup 6/ISCC.exe" "/DMyAppVersion=${ver}" installer/walite.iss
+          MSYS_NO_PATHCONV=1 "C:/Program Files (x86)/Inno Setup 6/ISCC.exe" "/DMyAppVersion=${ver}" installer/walite.iss
 
       - name: Package Unix artifact
         if: runner.os != 'Windows'
