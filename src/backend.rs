@@ -13,7 +13,7 @@ use whatsapp_rust::waproto::whatsapp as wa;
 use whatsapp_rust::wacore::types::events::Event;
 use whatsapp_rust::wacore::types::call::{CallAction, IncomingCall};
 use whatsapp_rust::voip::CallHandle;
-use whatsapp_rust::wacore_binary::Jid;
+use whatsapp_rust::wacore_binary::{Jid, JidExt};
 use whatsapp_rust::features::{GroupCreateOptions, GroupDescription, GroupSubject, PreviousDescription};
 use whatsapp_rust::pair_code::PairCodeOptions;
 use whatsapp_rust::Client;
@@ -947,6 +947,31 @@ async fn apply_poll_vote(
     crate::storage::persist_or_log(&state).await;
 }
 
+fn has_status_payload(m: &wa::Message) -> bool {
+    m.group_status_message.is_set()
+        || m.group_status_message_v2.is_set()
+        || m.status_mention_message.is_set()
+        || m.group_status_mention_message.is_set()
+        || m.status_notification_message.is_set()
+        || m.status_add_yours.is_set()
+        || m.status_question_answer_message.is_set()
+        || m.status_quoted_message.is_set()
+        || m.status_sticker_interaction_message.is_set()
+}
+
+/// Returns `true` for WhatsApp Stories/Status updates (`status@broadcast` or
+/// status/story wrappers) so they are never ingested as chat messages.
+fn is_status_story_message(chat_jid: &Jid, message: &wa::Message) -> bool {
+    if chat_jid.is_status_broadcast() {
+        return true;
+    }
+    let base = message.get_base_message();
+    if has_status_payload(message) || has_status_payload(base) {
+        return true;
+    }
+    find_context_info_ref(base).and_then(|ctx| ctx.is_group_status) == Some(true)
+}
+
 async fn handle_incoming_message(
     info: MessageInfo,
     message: wa::Message,
@@ -956,6 +981,13 @@ async fn handle_incoming_message(
 ) {
     let chat_jid = info.source.chat.clone();
     let sender_jid = info.source.sender.clone();
+    if is_status_story_message(&chat_jid, &message) {
+        debug!(
+            "Ignoring WhatsApp status/story update {} from {} in {}",
+            info.id, sender_jid, chat_jid
+        );
+        return;
+    }
     let from_me = info.source.is_from_me;
     
     // Check if this is a reaction message
@@ -1725,6 +1757,9 @@ async fn handle_event(
                         Ok(j) => j,
                         Err(_) => continue,
                     };
+                    if chat_jid.is_status_broadcast() {
+                        continue;
+                    }
                     
                     if let Some(pn_str) = &conv.pn_jid {
                         if let Ok(pn_jid) = pn_str.parse::<Jid>() {
@@ -1801,6 +1836,9 @@ async fn handle_event(
 
                             // Get the actual Message from WebMessageInfo
                             let wa_message = inner_msg.message.as_option();
+                            if wa_message.is_some_and(|m| is_status_story_message(&chat_jid, m)) {
+                                continue;
+                            }
                             if let Some(wa_m) = wa_message.as_ref() {
                                 let base_m = wa_m.get_base_message();
                                 if let Some(pm) = base_m.protocol_message.as_option() {
@@ -4263,4 +4301,63 @@ async fn handle_command(
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_status_story_message_filters_stories_but_keeps_dm_status_replies() {
+        let status_jid: Jid = "status@broadcast".parse().unwrap();
+        let dm_jid: Jid = "420111222333@s.whatsapp.net".parse().unwrap();
+
+        let text_msg = wa::Message {
+            conversation: Some("Moje story".to_string()),
+            ..Default::default()
+        };
+        assert!(is_status_story_message(&status_jid, &text_msg));
+        assert!(!is_status_story_message(&dm_jid, &text_msg));
+
+        let mut mention_msg = wa::Message::default();
+        mention_msg.status_mention_message =
+            whatsapp_rust::waproto::buffa::MessageField::some(Default::default());
+        assert!(is_status_story_message(&dm_jid, &mention_msg));
+
+        let mut group_status_v2 = wa::Message::default();
+        group_status_v2.group_status_message_v2 =
+            whatsapp_rust::waproto::buffa::MessageField::some(Default::default());
+        assert!(is_status_story_message(&dm_jid, &group_status_v2));
+
+        let mut ctx_flag_msg = wa::Message::default();
+        ctx_flag_msg.extended_text_message =
+            whatsapp_rust::waproto::buffa::MessageField::some(wa::message::ExtendedTextMessage {
+                text: Some("Skupinový status".to_string()),
+                context_info: whatsapp_rust::waproto::buffa::MessageField::some(
+                    wa::ContextInfo {
+                        is_group_status: Some(true),
+                        ..Default::default()
+                    },
+                ),
+                ..Default::default()
+            });
+        assert!(is_status_story_message(&dm_jid, &ctx_flag_msg));
+
+        let reply_to_story = wa::Message {
+            extended_text_message: whatsapp_rust::waproto::buffa::MessageField::some(
+                wa::message::ExtendedTextMessage {
+                    text: Some("Hezká fotka!".to_string()),
+                    context_info: whatsapp_rust::waproto::buffa::MessageField::some(
+                        wa::ContextInfo {
+                            remote_jid: Some("status@broadcast".to_string()),
+                            ..Default::default()
+                        },
+                    ),
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        };
+        assert!(!is_status_story_message(&dm_jid, &reply_to_story));
+    }
 }

@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
-use whatsapp_rust::wacore_binary::Jid;
+use whatsapp_rust::wacore_binary::{Jid, JidExt};
 
 use crate::state::{AppState, Chat, Contact, Message, SharedState};
 
@@ -278,6 +278,7 @@ impl Store {
         };
 
         let mut state = AppState::new();
+        let mut pruned_status = false;
         for (lid_str, pn_str) in persisted.lid_to_pn {
             if let (Ok(lid_jid), Ok(pn_jid)) =
                 (lid_str.parse::<Jid>(), pn_str.parse::<Jid>())
@@ -286,6 +287,10 @@ impl Store {
             }
         }
         for mut contact in persisted.contacts {
+            if contact.jid.is_status_broadcast() {
+                pruned_status = true;
+                continue;
+            }
             if let Some(ref n) = contact.name {
                 if !crate::util::is_real_name(n) {
                     contact.name = None;
@@ -308,6 +313,10 @@ impl Store {
         state.preferences = preferences;
 
         for mut chat in persisted.chats {
+            if chat.jid.is_status_broadcast() {
+                pruned_status = true;
+                continue;
+            }
             if let Some(name) = state.resolve_display_name(&chat.jid) {
                 chat.name = name;
             }
@@ -318,6 +327,9 @@ impl Store {
             .contacts
             .iter()
             .filter_map(|(jid, contact)| {
+                if jid.is_status_broadcast() {
+                    return None;
+                }
                 let human_name = contact
                     .name
                     .as_ref()
@@ -328,7 +340,10 @@ impl Store {
                             .as_ref()
                             .filter(|n| crate::util::is_real_name(n))
                     });
-                human_name.map(|name| (state.canonical_jid(jid), name.clone()))
+                human_name.and_then(|name| {
+                    let canon = state.canonical_jid(jid);
+                    (!canon.is_status_broadcast()).then_some((canon, name.clone()))
+                })
             })
             .collect();
         for (canon, name) in named_contacts {
@@ -347,6 +362,10 @@ impl Store {
 
         for (jid_str, mut msgs) in loaded {
             if let Ok(jid) = jid_str.parse::<Jid>() {
+                if jid.is_status_broadcast() {
+                    pruned_status = true;
+                    continue;
+                }
                 // Migrate any stray standalone emoji reaction messages into proper message reactions
                 let mut reactions_to_attach = Vec::new();
                 msgs.retain(|m| {
@@ -383,15 +402,28 @@ impl Store {
         state.pinned = persisted
             .pinned
             .into_iter()
-            .filter_map(|(jid, pin)| jid.parse::<Jid>().ok().map(|jid| (jid, pin)))
+            .filter_map(|(jid, pin)| {
+                jid.parse::<Jid>()
+                    .ok()
+                    .filter(|j| !j.is_status_broadcast())
+                    .map(|jid| (jid, pin))
+            })
             .collect();
         state.drafts = persisted
             .drafts
             .into_iter()
-            .filter_map(|(jid, text)| jid.parse::<Jid>().ok().map(|jid| (jid, text)))
+            .filter_map(|(jid, text)| {
+                jid.parse::<Jid>()
+                    .ok()
+                    .filter(|j| !j.is_status_broadcast())
+                    .map(|jid| (jid, text))
+            })
             .collect();
         state.clean_stray_reactions();
         state.consolidate_canonical_chats();
+        if pruned_status {
+            state.dirty = true;
+        }
 
         if legacy_inline {
             // Force one rewrite so the history lands in `messages/` and the
@@ -756,5 +788,29 @@ mod tests {
             std::fs::read_dir(temp.path().join("messages")).unwrap().count(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn status_broadcast_is_pruned_on_load() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::new(temp.path());
+        let status_jid: Jid = "status@broadcast".parse().unwrap();
+        let dm_jid: Jid = "420111222333@s.whatsapp.net".parse().unwrap();
+
+        let state = shared(AppState::new());
+        {
+            let mut s = state.write();
+            s.get_or_create_chat(status_jid.clone(), "Status".into(), false);
+            s.add_message(message(&status_jid, "s1", "Story"));
+            s.get_or_create_chat(dm_jid.clone(), "Alice".into(), false);
+            s.add_message(message(&dm_jid, "m1", "Ahoj"));
+        }
+        store.persist(&state, true).await.unwrap();
+
+        let loaded = Store::new(temp.path()).load().await.unwrap();
+        assert!(!loaded.chats.contains_key(&status_jid));
+        assert!(!loaded.messages.contains_key(&status_jid));
+        assert!(loaded.chats.contains_key(&dm_jid));
+        assert_eq!(loaded.messages.get(&dm_jid).map(|v| v.len()), Some(1));
     }
 }
