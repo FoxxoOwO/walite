@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:warust_gui/bridge.dart';
 import 'package:warust_gui/main.dart';
 import 'package:warust_gui/theme.dart';
+import 'package:warust_gui/widgets/conversation_view.dart';
 
 void main() {
   testWidgets('renders WhatsApp 3-column shell with chats, messages, poll and call overlay',
@@ -580,6 +581,171 @@ void main() {
     expect(field.controller?.text, 'vložený text');
     expect(bridge.pasteClipboardImageCalls, 1);
   });
+
+  testWidgets(
+      'typing enables send button and canceling ScheduleMessageDialog preserves composer text',
+      (tester) async {
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    final bridge = _RecordingBridge(18790);
+    addTearDown(bridge.dispose);
+
+    final snapshot = Snapshot.fromJson({
+      'type': 'snapshot',
+      'self': '420111222333@s.whatsapp.net',
+      'self_name': 'Teresa',
+      'connection': {'kind': 'connected'},
+      'selected': '420777888999@s.whatsapp.net',
+      'chats': [
+        {
+          'jid': '420777888999@s.whatsapp.net',
+          'name': 'Petr',
+          'unread': 0,
+          'group': false,
+        },
+      ],
+      'messages': [],
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: HomePage(
+          bridge: bridge,
+          snapshot: snapshot,
+          linked: true,
+          palette: WaPalette.whatsappDark,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byIcon(Icons.mic), findsOneWidget);
+    expect(find.byIcon(Icons.send), findsNothing);
+
+    await tester.enterText(find.byType(TextField).last, 'Plánovaná zpráva');
+    await tester.pump();
+
+    expect(find.byIcon(Icons.send), findsOneWidget);
+    expect(find.byIcon(Icons.mic), findsNothing);
+
+    await tester.tap(find.byIcon(Icons.schedule).last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Naplánovat'), findsOneWidget);
+    await tester.tap(find.text('Zrušit'));
+    await tester.pumpAndSettle();
+
+    final field = tester.widget<TextField>(find.byType(TextField).last);
+    expect(field.controller?.text, 'Plánovaná zpráva');
+    expect(
+      bridge.savedDrafts.where((d) => d.$2.isEmpty),
+      isEmpty,
+    );
+  });
+
+  testWidgets(
+      'off-window jumpToMessage requests backend fetch and completes scroll when snapshot arrives',
+      (tester) async {
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    final bridge = _RecordingBridge(18791);
+    addTearDown(bridge.dispose);
+
+    Map<String, Object?> makeSnapJson(List<Map<String, Object?>> msgs) => {
+          'type': 'snapshot',
+          'self': '420111222333@s.whatsapp.net',
+          'self_name': 'Teresa',
+          'connection': {'kind': 'connected'},
+          'selected': '420777888999@s.whatsapp.net',
+          'chats': [
+            {
+              'jid': '420777888999@s.whatsapp.net',
+              'name': 'Petr',
+              'unread': 0,
+              'group': false,
+            },
+          ],
+          'messages': msgs,
+        };
+
+    final initial = Snapshot.fromJson(makeSnapJson([
+      {
+        'id': 'M_NEW',
+        'chat': '420777888999@s.whatsapp.net',
+        'sender': '420777888999@s.whatsapp.net',
+        'text': 'Nová zpráva',
+        'ts': 1700001000000,
+        'from_me': false,
+      },
+    ]));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: HomePage(
+          bridge: bridge,
+          snapshot: initial,
+          linked: true,
+          palette: WaPalette.whatsappDark,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    tester.state<ConversationViewState>(find.byType(ConversationView)).jumpToMessage('M_OLD');
+    await tester.pump();
+
+    expect(
+      bridge.jumpedMessages,
+      [('420777888999@s.whatsapp.net', 'M_OLD')],
+    );
+
+    final loaded = Snapshot.fromJson(makeSnapJson([
+      {
+        'id': 'M_OLD',
+        'chat': '420777888999@s.whatsapp.net',
+        'sender': '420777888999@s.whatsapp.net',
+        'text': 'Stará zpráva',
+        'ts': 1700000000000,
+        'from_me': false,
+      },
+      {
+        'id': 'M_NEW',
+        'chat': '420777888999@s.whatsapp.net',
+        'sender': '420777888999@s.whatsapp.net',
+        'text': 'Nová zpráva',
+        'ts': 1700001000000,
+        'from_me': false,
+      },
+    ]));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: HomePage(
+          bridge: bridge,
+          snapshot: loaded,
+          linked: true,
+          palette: WaPalette.whatsappDark,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 3));
+
+    expect(find.text('Stará zpráva'), findsOneWidget);
+  });
 }
 
 class _RecordingBridge extends Bridge {
@@ -587,6 +753,7 @@ class _RecordingBridge extends Bridge {
 
   final List<(String, String)> savedDrafts = [];
   final List<(String, String)> sentTexts = [];
+  final List<(String, String)> jumpedMessages = [];
   int pasteClipboardImageCalls = 0;
 
   @override
@@ -597,6 +764,11 @@ class _RecordingBridge extends Bridge {
   @override
   void pasteClipboardImage() {
     pasteClipboardImageCalls += 1;
+  }
+
+  @override
+  void jumpToMessage(String chatJid, String msgId) {
+    jumpedMessages.add((chatJid, msgId));
   }
 
   @override

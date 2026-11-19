@@ -98,6 +98,24 @@ pub fn notify_for_chat(chat_jid: Option<&str>, title: &str, body: &str, sound: b
     show_toast_for_chat(chat_jid, title, body)
 }
 
+fn should_play_unfocused(focused: bool, limiter: &mut RateLimiter, now: Instant) -> bool {
+    !focused && limiter.allow(now)
+}
+
+/// Play the notification sound when desktop toasts are turned off,
+/// honoring both window focus and the burst rate limiter.
+pub fn play_sound_if_unfocused() -> bool {
+    let allowed = {
+        let mut limiter = LIMITER.lock();
+        should_play_unfocused(window_focused(), &mut limiter, Instant::now())
+    };
+    if !allowed {
+        return false;
+    }
+    play_sound();
+    true
+}
+
 /// Ensure the `Warust` AppUserModelID and icon exist under `HKCU\Software\Classes\AppUserModelId\Warust`
 /// so Windows 10/11 Action Center displays the app name and icon on native toasts.
 #[cfg(target_os = "windows")]
@@ -314,6 +332,7 @@ fn play_sound_blocking(preset: &str, custom_path: Option<&str>) -> Result<(), St
                     Ok(source) => {
                         player.append(source.take_duration(Duration::from_secs(6)));
                         player.sleep_until_end();
+                        std::thread::sleep(Duration::from_millis(50));
                         return Ok(());
                     }
                     Err(e) => {
@@ -482,5 +501,31 @@ mod tests {
     fn ensure_com_mta_is_idempotent() {
         ensure_com_mta();
         ensure_com_mta();
+    }
+
+    #[test]
+    fn play_sound_if_unfocused_respects_focus_and_rate_limiter() {
+        set_window_focused(true);
+        assert!(!play_sound_if_unfocused());
+
+        let mut limiter = RateLimiter::new();
+        let t0 = Instant::now();
+        assert!(!should_play_unfocused(true, &mut limiter, t0));
+        assert!(
+            limiter.last.is_none(),
+            "focused call must not consume rate limiter"
+        );
+
+        assert!(should_play_unfocused(false, &mut limiter, t0));
+        assert!(!should_play_unfocused(
+            false,
+            &mut limiter,
+            t0 + Duration::from_millis(500)
+        ));
+        assert!(should_play_unfocused(
+            false,
+            &mut limiter,
+            t0 + Duration::from_secs(3)
+        ));
     }
 }

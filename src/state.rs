@@ -1215,6 +1215,7 @@ impl AppState {
         }
         self.dirty = true;
 
+        let mut id_indices: HashMap<Jid, HashMap<String, usize>> = HashMap::new();
         let mut affected_chats = HashSet::new();
 
         for mut msg in new_msgs {
@@ -1241,9 +1242,17 @@ impl AppState {
                 }
             }
 
-            if let Some(pos) = msgs.iter().position(|m| m.id == msg.id) {
+            let index_map = id_indices.entry(canon_chat_jid).or_insert_with(|| {
+                msgs.iter()
+                    .enumerate()
+                    .map(|(i, m)| (m.id.clone(), i))
+                    .collect()
+            });
+            if let Some(&pos) = index_map.get(&msg.id) {
                 msgs[pos].status = msg.status;
             } else {
+                let pos = msgs.len();
+                index_map.insert(msg.id.clone(), pos);
                 msgs.push(msg);
             }
         }
@@ -1328,32 +1337,55 @@ impl AppState {
 
             // 2. Merge chats: if lid chat exists
             if let Some(lid_chat) = self.chats.remove(&lid_jid) {
-                let pn_chat = self.chats.entry(pn_jid.clone()).or_insert_with(|| Chat {
-                    jid: pn_jid.clone(),
-                    name: lid_chat.name.clone(),
-                    last_message: lid_chat.last_message.clone(),
-                    unread_count: lid_chat.unread_count,
-                    is_group: false,
-                    is_archived: lid_chat.is_archived,
-                    is_pinned: lid_chat.is_pinned,
-                    mute_until: lid_chat.mute_until,
-                    last_activity: lid_chat.last_activity,
-                    participants: HashSet::new(),
-                    is_typing: false,
-                    typing_until: None,
-                });
-                if crate::util::is_real_name(&lid_chat.name) && !crate::util::is_real_name(&pn_chat.name) {
-                    pn_chat.name = lid_chat.name;
-                }
-                if lid_chat.last_activity > pn_chat.last_activity {
-                    pn_chat.last_activity = lid_chat.last_activity;
-                    if lid_chat.last_message.is_some() {
-                        pn_chat.last_message = lid_chat.last_message;
+                if let Some(pn_chat) = self.chats.get_mut(&pn_jid) {
+                    pn_chat.unread_count = pn_chat.unread_count.saturating_add(lid_chat.unread_count);
+                    if lid_chat.is_archived && pn_chat.last_message.is_none() {
+                        pn_chat.is_archived = true;
                     }
+                    if crate::util::is_real_name(&lid_chat.name) && !crate::util::is_real_name(&pn_chat.name) {
+                        pn_chat.name = lid_chat.name;
+                    }
+                    if lid_chat.last_activity > pn_chat.last_activity {
+                        pn_chat.last_activity = lid_chat.last_activity;
+                        if lid_chat.last_message.is_some() {
+                            pn_chat.last_message = lid_chat.last_message;
+                        }
+                    }
+                    if lid_chat.is_pinned {
+                        pn_chat.is_pinned = true;
+                    }
+                } else {
+                    self.chats.insert(
+                        pn_jid.clone(),
+                        Chat {
+                            jid: pn_jid.clone(),
+                            name: lid_chat.name,
+                            last_message: lid_chat.last_message,
+                            unread_count: lid_chat.unread_count,
+                            is_group: false,
+                            is_archived: lid_chat.is_archived,
+                            is_pinned: lid_chat.is_pinned,
+                            mute_until: lid_chat.mute_until,
+                            last_activity: lid_chat.last_activity,
+                            participants: HashSet::new(),
+                            is_typing: false,
+                            typing_until: None,
+                        },
+                    );
                 }
-                if lid_chat.is_pinned {
-                    pn_chat.is_pinned = true;
+            }
+
+            // Migrate per-chat metadata from LID to canonical PN
+            if let Some(draft) = self.drafts.remove(&lid_jid) {
+                if !draft.trim().is_empty() {
+                    self.drafts.entry(pn_jid.clone()).or_insert(draft);
                 }
+            }
+            if let Some(pin) = self.pinned.remove(&lid_jid) {
+                self.pinned.entry(pn_jid.clone()).or_insert(pin);
+            }
+            if let Some(exp) = self.ephemeral.remove(&lid_jid) {
+                self.ephemeral.entry(pn_jid.clone()).or_insert(exp);
             }
 
             // 3. If selected_chat was the LID, update to PN
@@ -1452,7 +1484,7 @@ impl AppState {
             }
         }
         if let Some(msgs) = self.get_chat_messages(&chat.jid) {
-            if let Some(last_msg) = msgs.iter().map(|m| m.timestamp).max() {
+            if let Some(last_msg) = msgs.last().map(|m| m.timestamp) {
                 if last_msg > best {
                     best = last_msg;
                 }
@@ -1512,19 +1544,12 @@ impl AppState {
 
     /// Pinned first, then by latest activity, then alphabetically.
     fn sort_chats(&self, chats: &mut [&Chat]) {
-        chats.sort_by(|a, b| {
-            match (a.is_pinned, b.is_pinned) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => {
-                    let ts_a = self.get_chat_latest_timestamp(a);
-                    let ts_b = self.get_chat_latest_timestamp(b);
-                    match ts_b.cmp(&ts_a) {
-                        std::cmp::Ordering::Equal => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-                        other => other,
-                    }
-                }
-            }
+        chats.sort_by_cached_key(|c| {
+            (
+                std::cmp::Reverse(c.is_pinned),
+                std::cmp::Reverse(self.get_chat_latest_timestamp(c)),
+                c.name.to_lowercase(),
+            )
         });
     }
 
@@ -2796,5 +2821,103 @@ mod selection_tests {
         assert_eq!(target.message_id, "ABC123");
         assert!(!target.scrolled, "the first frame still has to scroll");
         assert!(!target.expired(), "a fresh target is alive");
+    }
+
+    #[test]
+    fn consolidate_canonical_chats_merges_unread_archived_and_metadata() {
+        let mut state = AppState::default();
+        let lid: Jid = "111222333@lid".parse().unwrap();
+        let pn: Jid = "420111222333@s.whatsapp.net".parse().unwrap();
+        state.lid_to_pn.insert(lid.clone(), pn.clone());
+
+        state.chats.insert(
+            pn.clone(),
+            Chat {
+                jid: pn.clone(),
+                name: "420111222333".into(),
+                last_message: None,
+                unread_count: 2,
+                is_group: false,
+                is_archived: false,
+                is_pinned: false,
+                mute_until: None,
+                last_activity: Utc::now(),
+                participants: HashSet::new(),
+                is_typing: false,
+                typing_until: None,
+            },
+        );
+        state.chats.insert(
+            lid.clone(),
+            Chat {
+                jid: lid.clone(),
+                name: "Jan Novák".into(),
+                last_message: None,
+                unread_count: 3,
+                is_group: false,
+                is_archived: true,
+                is_pinned: true,
+                mute_until: None,
+                last_activity: Utc::now(),
+                participants: HashSet::new(),
+                is_typing: false,
+                typing_until: None,
+            },
+        );
+        state.drafts.insert(lid.clone(), "rozepsáno".into());
+        state
+            .pinned
+            .insert(lid.clone(), PinnedMessage::new("P1", Some(60), None));
+        state.ephemeral.insert(lid.clone(), 3600);
+
+        state.consolidate_canonical_chats();
+
+        assert!(!state.chats.contains_key(&lid));
+        let merged = state.chats.get(&pn).expect("PN chat survives");
+        assert_eq!(merged.unread_count, 5);
+        assert!(merged.is_archived);
+        assert!(merged.is_pinned);
+        assert_eq!(merged.name, "Jan Novák");
+        assert_eq!(state.drafts.get(&pn).map(String::as_str), Some("rozepsáno"));
+        assert!(!state.drafts.contains_key(&lid));
+        assert_eq!(
+            state.pinned.get(&pn).map(|p| p.message_id.as_str()),
+            Some("P1")
+        );
+        assert!(!state.pinned.contains_key(&lid));
+        assert_eq!(state.ephemeral.get(&pn), Some(&3600));
+        assert!(!state.ephemeral.contains_key(&lid));
+    }
+
+    #[test]
+    fn add_messages_batch_deduplicates_and_maintains_order() {
+        let mut state = AppState::default();
+        let chat: Jid = "420111222333@s.whatsapp.net".parse().unwrap();
+        let base = Utc::now();
+        let make = |id: &str, offset_secs: i64| {
+            Message::new_text(
+                id.into(),
+                chat.clone(),
+                chat.clone(),
+                format!("msg {id}"),
+                base + chrono::Duration::seconds(offset_secs),
+                false,
+                MessageStatus::Read,
+                None,
+                None,
+            )
+        };
+
+        state.add_messages_batch(vec![make("M2", 20), make("M1", 10), make("M1", 10)]);
+        state.add_messages_batch(vec![make("M3", 30), make("M2", 20)]);
+
+        let ids: Vec<&str> = state
+            .messages
+            .get(&chat)
+            .unwrap()
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["M1", "M2", "M3"]);
     }
 }

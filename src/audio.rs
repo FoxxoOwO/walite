@@ -69,13 +69,24 @@ pub fn ffprobe_bin() -> PathBuf {
     sibling_binary("ffprobe").unwrap_or_else(|| PathBuf::from("ffprobe"))
 }
 
+/// Build a [`Command`] configured not to flash a console window on Windows.
+pub fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd
+}
+
 /// Whether a usable ffmpeg binary was found (cached after first probe).
 pub fn ffmpeg_available() -> bool {
     use std::sync::OnceLock;
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
     *AVAILABLE.get_or_init(|| {
         let path = ffmpeg_bin();
-        let ok = Command::new(&path)
+        let ok = hidden_command(&path)
             .arg("-version")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -113,7 +124,7 @@ fn transcode_to_wav(src: &Path) -> Result<PathBuf, String> {
         return Err("ffmpeg není k dispozici (nastav WARUST_FFMPEG nebo nainstaluj ffmpeg)".into());
     }
     let out = temp_wav_path(src);
-    let status = Command::new(ffmpeg_bin())
+    let status = hidden_command(ffmpeg_bin())
         .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
         .arg(src)
         .args([
@@ -165,6 +176,9 @@ fn open_source(path: &Path) -> Result<(rodio::Decoder<std::io::BufReader<std::fs
 
 fn ensure_stream(inner: &mut Inner) -> Result<(), String> {
     if inner.stream.is_none() {
+        #[cfg(target_os = "windows")]
+        crate::notifications::ensure_com_mta();
+
         let stream = rodio::DeviceSinkBuilder::open_default_sink()
             .map_err(|e| format!("zvukové zařízení není k dispozici: {e}"))?;
         inner.stream = Some(stream);
@@ -201,24 +215,28 @@ pub fn set_error(message: String) {
 }
 
 fn play_inner(id: &str, path: &Path) -> Result<(), String> {
-    let mut inner = lock();
+    {
+        let mut inner = lock();
+        // Always stop whatever is running before switching tracks.
+        if let Some(p) = inner.player.take() {
+            p.stop();
+        }
+        inner.playing_id = None;
+        inner.duration = None;
 
-    // Always stop whatever is running before switching tracks.
-    if let Some(p) = inner.player.take() {
-        p.stop();
+        // Drop the previous transcode, if any.
+        if let Some(old) = inner.temp.take() {
+            let _ = std::fs::remove_file(old);
+        }
     }
-    inner.playing_id = None;
-    inner.duration = None;
 
-    // Drop the previous transcode, if any.
-    if let Some(old) = inner.temp.take() {
-        let _ = std::fs::remove_file(old);
-    }
-
-    ensure_stream(&mut inner)?;
-
+    // Transcode/open off-lock so audio polling (`playing_id`, `position`, etc.)
+    // never stalls behind a potentially slow ffmpeg subprocess.
     let (decoder, temp) = open_source(path)?;
     let duration = Source::total_duration(&decoder);
+
+    let mut inner = lock();
+    ensure_stream(&mut inner)?;
 
     let player = {
         let mixer = inner

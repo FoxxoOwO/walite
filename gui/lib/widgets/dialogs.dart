@@ -666,7 +666,10 @@ class _SearchMessagesDialogState extends State<SearchMessagesDialog> {
               TextField(
                 controller: _queryCtrl,
                 autofocus: true,
-                onChanged: (_) => _runSearch(),
+                onChanged: (_) {
+                  setState(() {});
+                  _runSearch();
+                },
                 decoration: InputDecoration(
                   isDense: true,
                   filled: true,
@@ -677,6 +680,7 @@ class _SearchMessagesDialogState extends State<SearchMessagesDialog> {
                           icon: const Icon(Icons.close, size: 16),
                           onPressed: () {
                             _queryCtrl.clear();
+                            setState(() {});
                             _runSearch();
                           },
                         )
@@ -1109,7 +1113,7 @@ class _CallOverlayState extends State<CallOverlay> {
   void initState() {
     super.initState();
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() {});
+      if (mounted && widget.call.status != 'ended') setState(() {});
     });
   }
 
@@ -1404,9 +1408,12 @@ class _ScheduleMessageDialogState extends State<ScheduleMessageDialog> {
                   const Icon(Icons.schedule,
                       size: 17, color: WaPalette.accentBright),
                   const SizedBox(width: 8),
-                  Text(
-                    '${tr.t('Odeslání', 'Dispatch')}: $when',
-                    style: const TextStyle(fontWeight: FontWeight.w500),
+                  Expanded(
+                    child: Text(
+                      '${tr.t('Odeslání', 'Dispatch')}: $when',
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontWeight: FontWeight.w500),
+                    ),
                   ),
                 ],
               ),
@@ -1416,7 +1423,7 @@ class _ScheduleMessageDialogState extends State<ScheduleMessageDialog> {
       ),
       actions: [
         TextButton(
-          onPressed: () => Navigator.pop(context),
+          onPressed: () => Navigator.pop(context, false),
           child: Text(tr.t('Zrušit', 'Cancel')),
         ),
         FilledButton(
@@ -1434,7 +1441,7 @@ class _ScheduleMessageDialogState extends State<ScheduleMessageDialog> {
                   }
                   widget.bridge.schedule(
                       widget.chatJid, _textCtrl.text.trim(), _target);
-                  Navigator.pop(context);
+                  Navigator.pop(context, true);
                 }
               : null,
           style: FilledButton.styleFrom(backgroundColor: WaPalette.accentDark),
@@ -1610,6 +1617,7 @@ class _ExportChatDialogState extends State<ExportChatDialog> {
             final dir = await getDirectoryPath(
               confirmButtonText: tr.t('Exportovat sem', 'Export here'),
             );
+            if (dir == null || !mounted) return;
             widget.bridge.exportChat(widget.chat.jid, _format, dir: dir);
           },
           style: FilledButton.styleFrom(backgroundColor: WaPalette.accentDark),
@@ -2074,7 +2082,8 @@ class _StarredMessagesDialogState extends State<StarredMessagesDialog> {
                                           widget.bridge
                                               .starMessage(h.chat, h.id, false);
                                           setState(() => _items = _items
-                                              .where((e) => e.id != h.id)
+                                              .where((e) => !(e.id == h.id &&
+                                                  e.chat == h.chat))
                                               .toList());
                                         },
                                         icon: const Icon(
@@ -2129,16 +2138,26 @@ class _VideoLightboxDialogState extends State<VideoLightboxDialog> {
     super.initState();
     try {
       final p = Player();
-      final c = VideoController(p);
       _player = p;
+      final c = VideoController(p);
       _controller = c;
       if (widget.loopMuted) {
-        p.setPlaylistMode(PlaylistMode.single);
-        p.setVolume(0);
+        unawaited(p.setPlaylistMode(PlaylistMode.single).catchError((_) {}));
+        unawaited(p.setVolume(0).catchError((_) {}));
       }
-      p.open(Media(Uri.file(widget.path).toString()));
+      unawaited(
+        p.open(Media(Uri.file(widget.path).toString())).catchError((_) {
+          if (mounted) setState(() => _failed = true);
+        }),
+      );
     } catch (_) {
+      final player = _player;
+      _player = null;
+      _controller = null;
       _failed = true;
+      if (player != null) {
+        unawaited(player.dispose().catchError((_) {}));
+      }
     }
   }
 
@@ -2265,14 +2284,24 @@ class _InlineGifVideoState extends State<InlineGifVideo> {
   void _initPlayer() {
     try {
       final p = Player();
-      final c = VideoController(p);
       _player = p;
+      final c = VideoController(p);
       _controller = c;
-      p.setPlaylistMode(PlaylistMode.single);
-      p.setVolume(0);
-      p.open(Media(Uri.file(widget.path).toString()));
+      unawaited(p.setPlaylistMode(PlaylistMode.single).catchError((_) {}));
+      unawaited(p.setVolume(0).catchError((_) {}));
+      unawaited(
+        p.open(Media(Uri.file(widget.path).toString())).catchError((_) {
+          if (mounted) setState(() => _failed = true);
+        }),
+      );
     } catch (_) {
+      final player = _player;
+      _player = null;
+      _controller = null;
       _failed = true;
+      if (player != null) {
+        unawaited(player.dispose().catchError((_) {}));
+      }
     }
   }
 

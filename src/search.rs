@@ -1,6 +1,6 @@
 //! Message Search engine with multi-criteria filtering
 
-use chrono::Utc;
+use chrono::{Local, Utc};
 use whatsapp_rust::wacore_binary::Jid;
 use crate::state::{AppState, Message};
 
@@ -115,6 +115,13 @@ pub struct SearchResultItem {
     pub sender_name: String,
 }
 
+fn contains_ascii_ci(haystack: &str, needle: &[u8]) -> bool {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|w| w.eq_ignore_ascii_case(needle))
+}
+
 /// Search across stored messages according to active filters
 pub fn search_messages(
     state: &AppState,
@@ -126,136 +133,145 @@ pub fn search_messages(
 
     let query_lower = filter.query.trim().to_lowercase();
     let now = Utc::now();
+    let today_local = Local::now().date_naive();
     let mut results = Vec::new();
 
     // Determine target chats to scan
-    let target_chats: Vec<&Jid> = match filter.scope {
+    let target_chats: Vec<(&Jid, &[Message])> = match filter.scope {
         SearchScope::CurrentChat => {
             if let Some(ref selected) = state.selected_chat {
-                vec![selected]
+                state
+                    .get_chat_messages(selected)
+                    .map(|msgs| vec![(selected, msgs.as_slice())])
+                    .unwrap_or_default()
             } else {
-                state.messages.keys().collect()
+                state
+                    .messages
+                    .iter()
+                    .map(|(j, m)| (j, m.as_slice()))
+                    .collect()
             }
         }
-        SearchScope::AllChats => state.messages.keys().collect(),
+        SearchScope::AllChats => state
+            .messages
+            .iter()
+            .map(|(j, m)| (j, m.as_slice()))
+            .collect(),
     };
 
-    for chat_jid in target_chats {
-        if let Some(msgs) = state.messages.get(chat_jid) {
-            let chat_name = state.chats.get(chat_jid)
-                .map(|c| c.name.clone())
-                .unwrap_or_else(|| crate::util::format_jid(chat_jid));
+    for (chat_jid, msgs) in target_chats {
+        let canon = state.canonical_jid(chat_jid);
+        let chat_name = state
+            .chats
+            .get(&canon)
+            .or_else(|| state.chats.get(chat_jid))
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| crate::util::format_jid(&canon));
 
-            for msg in msgs {
-                // Filter 1: Sender (Sent vs Received)
-                match filter.sender {
-                    SearchSender::All => {}
-                    SearchSender::SentByMe if !msg.from_me => continue,
-                    SearchSender::Received if msg.from_me => continue,
-                    _ => {}
-                }
+        for msg in msgs {
+            // Filter 1: Sender (Sent vs Received)
+            match filter.sender {
+                SearchSender::All => {}
+                SearchSender::SentByMe if !msg.from_me => continue,
+                SearchSender::Received if msg.from_me => continue,
+                _ => {}
+            }
 
-                // Filter 2: Content Type
-                match filter.content_type {
-                    SearchContentType::All => {}
-                    SearchContentType::TextOnly => {
-                        if msg.media_type.is_some() {
-                            continue;
-                        }
-                    }
-                    SearchContentType::MediaOnly => {
-                        if msg.media_type.is_none() {
-                            continue;
-                        }
-                    }
-                    SearchContentType::LinksOnly => {
-                        let text_lower = msg.text.to_lowercase();
-                        let caption_lower = msg
-                            .media_caption
-                            .as_deref()
-                            .map(|c| c.to_lowercase())
-                            .unwrap_or_default();
-                        if !text_lower.contains("http://")
-                            && !text_lower.contains("https://")
-                            && !caption_lower.contains("http://")
-                            && !caption_lower.contains("https://")
-                        {
-                            continue;
-                        }
-                    }
-                    SearchContentType::PollsOnly => {
-                        if msg.poll.is_none() {
-                            continue;
-                        }
-                    }
-                    SearchContentType::WithReactionsOnly => {
-                        if msg.reactions.is_empty() {
-                            continue;
-                        }
-                    }
-                    SearchContentType::StarredOnly => {
-                        if !msg.starred {
-                            continue;
-                        }
-                    }
-                }
-
-                // Filter 3: Date Range
-                match filter.date_range {
-                    SearchDateRange::AllTime => {}
-                    SearchDateRange::Today => {
-                        if msg.timestamp.date_naive() != now.date_naive() {
-                            continue;
-                        }
-                    }
-                    SearchDateRange::Last7Days => {
-                        if (now - msg.timestamp).num_days() > 7 {
-                            continue;
-                        }
-                    }
-                    SearchDateRange::Last30Days => {
-                        if (now - msg.timestamp).num_days() > 30 {
-                            continue;
-                        }
-                    }
-                }
-
-                // Filter 4: Text Query match (body, caption, filename, poll, or shared contacts)
-                if !query_lower.is_empty() {
-                    let in_text = msg.text.to_lowercase().contains(&query_lower);
-                    let in_caption = msg.media_caption.as_deref().map_or(false, |c| c.to_lowercase().contains(&query_lower));
-                    let in_filename = msg
-                        .media_path
-                        .as_deref()
-                        .and_then(|p| std::path::Path::new(p).file_name())
-                        .and_then(|n| n.to_str())
-                        .map_or(false, |n| n.to_lowercase().contains(&query_lower));
-                    let in_poll = msg.poll.as_ref().map_or(false, |p| {
-                        p.question.to_lowercase().contains(&query_lower)
-                            || p.options.iter().any(|o| o.to_lowercase().contains(&query_lower))
-                    });
-                    let in_contacts = msg.contacts.iter().any(|c| {
-                        c.name.to_lowercase().contains(&query_lower)
-                            || c.phone.to_lowercase().contains(&query_lower)
-                    });
-                    if !in_text && !in_caption && !in_filename && !in_poll && !in_contacts {
+            // Filter 2: Content Type
+            match filter.content_type {
+                SearchContentType::All => {}
+                SearchContentType::TextOnly => {
+                    if msg.media_type.is_some() {
                         continue;
                     }
                 }
-
-                let sender_name = if msg.from_me {
-                    "You".to_string()
-                } else {
-                    state.resolve_display_name(&msg.sender_jid)
-                        .unwrap_or_else(|| crate::util::format_jid(&msg.sender_jid))
-                };
-
-                results.push(SearchResultItem {
-                    message: msg.clone(),
-                    chat_name: chat_name.clone(),
-                    sender_name,
-                });
+                SearchContentType::MediaOnly => {
+                    if msg.media_type.is_none() {
+                        continue;
+                    }
+                }
+                SearchContentType::LinksOnly => {
+                    let has_link = |s: &str| {
+                        contains_ascii_ci(s, b"http://") || contains_ascii_ci(s, b"https://")
+                    };
+                    if !has_link(&msg.text)
+                        && !msg.media_caption.as_deref().is_some_and(has_link)
+                    {
+                        continue;
+                    }
+                }
+                SearchContentType::PollsOnly => {
+                    if msg.poll.is_none() {
+                        continue;
+                    }
+                }
+                SearchContentType::WithReactionsOnly => {
+                    if msg.reactions.is_empty() {
+                        continue;
+                    }
+                }
+                SearchContentType::StarredOnly => {
+                    if !msg.starred {
+                        continue;
+                    }
+                }
             }
+
+            // Filter 3: Date Range
+            match filter.date_range {
+                SearchDateRange::AllTime => {}
+                SearchDateRange::Today => {
+                    if msg.timestamp.with_timezone(&Local).date_naive() != today_local {
+                        continue;
+                    }
+                }
+                SearchDateRange::Last7Days => {
+                    if (now - msg.timestamp).num_days() > 7 {
+                        continue;
+                    }
+                }
+                SearchDateRange::Last30Days => {
+                    if (now - msg.timestamp).num_days() > 30 {
+                        continue;
+                    }
+                }
+            }
+
+            // Filter 4: Text Query match (body, caption, filename, poll, or shared contacts)
+            if !query_lower.is_empty() {
+                let in_text = msg.text.to_lowercase().contains(&query_lower);
+                let in_caption = msg.media_caption.as_deref().map_or(false, |c| c.to_lowercase().contains(&query_lower));
+                let in_filename = msg
+                    .media_path
+                    .as_deref()
+                    .and_then(|p| std::path::Path::new(p).file_name())
+                    .and_then(|n| n.to_str())
+                    .map_or(false, |n| n.to_lowercase().contains(&query_lower));
+                let in_poll = msg.poll.as_ref().map_or(false, |p| {
+                    p.question.to_lowercase().contains(&query_lower)
+                        || p.options.iter().any(|o| o.to_lowercase().contains(&query_lower))
+                });
+                let in_contacts = msg.contacts.iter().any(|c| {
+                    c.name.to_lowercase().contains(&query_lower)
+                        || c.phone.to_lowercase().contains(&query_lower)
+                });
+                if !in_text && !in_caption && !in_filename && !in_poll && !in_contacts {
+                    continue;
+                }
+            }
+
+            let sender_name = if msg.from_me {
+                "You".to_string()
+            } else {
+                state.resolve_display_name(&msg.sender_jid)
+                    .unwrap_or_else(|| crate::util::format_jid(&msg.sender_jid))
+            };
+
+            results.push(SearchResultItem {
+                message: msg.clone(),
+                chat_name: chat_name.clone(),
+                sender_name,
+            });
         }
     }
 
@@ -399,5 +415,37 @@ mod tests {
         );
         assert_eq!(starred.len(), 1);
         assert_eq!(starred[0].message.id, "R1");
+    }
+
+    #[test]
+    fn search_resolves_canonical_current_chat_and_matches_uppercase_links() {
+        let mut state = AppState::new();
+        let lid: Jid = "999888777@lid".parse().unwrap();
+        let pn: Jid = "420737526533@s.whatsapp.net".parse().unwrap();
+        state.lid_to_pn.insert(lid.clone(), pn.clone());
+        state.get_or_create_chat(pn.clone(), "Eva".to_string(), false);
+        state.selected_chat = Some(lid);
+
+        let msg = Message::new_text(
+            "UPPER_LINK".to_string(),
+            pn.clone(),
+            pn.clone(),
+            "Mrkni na HTTPS://Example.COM/path".to_string(),
+            Utc::now(),
+            false,
+            MessageStatus::Read,
+            None,
+            None,
+        );
+        state.add_message(msg);
+
+        let filter = MessageSearchFilter {
+            scope: SearchScope::CurrentChat,
+            content_type: SearchContentType::LinksOnly,
+            ..Default::default()
+        };
+        let res = search_messages(&state, &filter);
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].message.id, "UPPER_LINK");
     }
 }

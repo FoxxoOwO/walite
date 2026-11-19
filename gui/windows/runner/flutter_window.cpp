@@ -60,11 +60,36 @@ bool IsBridgePortOpen() {
   SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   bool open = false;
   if (sock != INVALID_SOCKET) {
+    u_long mode = 1;
+    ioctlsocket(sock, FIONBIO, &mode);
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(kBridgePort);
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
-    open = (connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+    int res = connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    if (res == 0) {
+      open = true;
+    } else if (WSAGetLastError() == WSAEWOULDBLOCK) {
+      fd_set write_fds;
+      fd_set err_fds;
+      FD_ZERO(&write_fds);
+      FD_ZERO(&err_fds);
+      FD_SET(sock, &write_fds);
+      FD_SET(sock, &err_fds);
+      timeval tv{};
+      tv.tv_sec = 0;
+      tv.tv_usec = 100000;
+      if (select(0, nullptr, &write_fds, &err_fds, &tv) > 0 &&
+          FD_ISSET(sock, &write_fds) && !FD_ISSET(sock, &err_fds)) {
+        int so_err = 0;
+        int len = sizeof(so_err);
+        if (getsockopt(sock, SOL_SOCKET, SO_ERROR,
+                       reinterpret_cast<char*>(&so_err), &len) == 0 &&
+            so_err == 0) {
+          open = true;
+        }
+      }
+    }
     closesocket(sock);
   }
   WSACleanup();
@@ -465,15 +490,13 @@ void FlutterWindow::CreateOrUpdateTrayIcon() {
       GetModuleHandle(nullptr), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
       sm_cx, GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR | LR_SHARED));
 
-  if (badge_tray_icon_) {
-    DestroyIcon(badge_tray_icon_);
-    badge_tray_icon_ = nullptr;
-  }
+  HICON prev_badge = badge_tray_icon_;
+  HICON new_badge = nullptr;
   HICON active_icon = base_icon;
   if (unread_count_ > 0 && base_icon) {
-    badge_tray_icon_ = CreateTrayBadgedIcon(base_icon, sm_cx);
-    if (badge_tray_icon_) {
-      active_icon = badge_tray_icon_;
+    new_badge = CreateTrayBadgedIcon(base_icon, sm_cx);
+    if (new_badge) {
+      active_icon = new_badge;
     }
   }
 
@@ -495,6 +518,11 @@ void FlutterWindow::CreateOrUpdateTrayIcon() {
   } else {
     tray_added_ = Shell_NotifyIconW(NIM_ADD, &nid_) != FALSE;
   }
+
+  badge_tray_icon_ = new_badge;
+  if (prev_badge) {
+    DestroyIcon(prev_badge);
+  }
 }
 
 void FlutterWindow::UpdateTaskbarOverlay() {
@@ -512,16 +540,18 @@ void FlutterWindow::UpdateTaskbarOverlay() {
   }
   if (!taskbar_list_) return;
 
-  if (taskbar_overlay_icon_) {
-    DestroyIcon(taskbar_overlay_icon_);
-    taskbar_overlay_icon_ = nullptr;
-  }
+  HICON prev_overlay = taskbar_overlay_icon_;
   if (unread_count_ > 0) {
     taskbar_overlay_icon_ = CreateTaskbarUnreadIcon(unread_count_);
-    taskbar_list_->SetOverlayIcon(hwnd, taskbar_overlay_icon_,
-                                  L"Nepřečtené zprávy");
+    const wchar_t* desc =
+        tray_lang_ == L"en" ? L"Unread messages" : L"Nepřečtené zprávy";
+    taskbar_list_->SetOverlayIcon(hwnd, taskbar_overlay_icon_, desc);
   } else {
+    taskbar_overlay_icon_ = nullptr;
     taskbar_list_->SetOverlayIcon(hwnd, nullptr, L"");
+  }
+  if (prev_overlay) {
+    DestroyIcon(prev_overlay);
   }
 }
 
@@ -665,7 +695,9 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
       }
       break;
     case WM_FONTCHANGE:
-      flutter_controller_->engine()->ReloadSystemFonts();
+      if (flutter_controller_ && flutter_controller_->engine()) {
+        flutter_controller_->engine()->ReloadSystemFonts();
+      }
       break;
     case WM_DROPFILES: {
       HDROP hdrop = reinterpret_cast<HDROP>(wparam);

@@ -129,6 +129,9 @@ pub fn cancel() {
 }
 
 fn run_capture(sink: Arc<Mutex<Vec<f32>>>, stop: Receiver<()>, ready: Sender<Result<u32, String>>) {
+    #[cfg(target_os = "windows")]
+    crate::notifications::ensure_com_mta();
+
     let host = cpal::default_host();
     let Some(device) = host.default_input_device() else {
         let _ = ready.send(Err("není dostupný žádný mikrofon".into()));
@@ -229,7 +232,7 @@ fn write_wav(path: &Path, samples: &[f32], rate: u32) -> Result<(), String> {
 
 fn encode_opus(wav: &Path) -> Result<PathBuf, String> {
     let out = temp_path("ogg");
-    let result = std::process::Command::new(crate::audio::ffmpeg_bin())
+    let result = crate::audio::hidden_command(crate::audio::ffmpeg_bin())
         .arg("-y")
         .arg("-loglevel")
         .arg("error")

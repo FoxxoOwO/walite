@@ -52,11 +52,13 @@ class _SettingsDialogState extends State<SettingsDialog> {
   StreamSubscription<MediaStats>? _statsSub;
   StreamSubscription<ProfileResult>? _profileSub;
   String? _cleanedBanner;
+  late String _currentLang;
 
   @override
   void initState() {
     super.initState();
     _tab = widget.initialTab;
+    _currentLang = widget.initialSnapshot.prefs.language;
     _nameCtrl = TextEditingController(
       text: widget.initialSnapshot.selfName ?? '',
     );
@@ -75,7 +77,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
     });
     _profileSub = widget.bridge.profileResults.listen((res) {
       if (!mounted) return;
-      final isEn = widget.initialSnapshot.prefs.language == 'en';
+      final isEn = _currentLang == 'en';
       setState(() {
         _photoBusy = false;
         if (res.ok) {
@@ -90,7 +92,9 @@ class _SettingsDialogState extends State<SettingsDialog> {
         }
       });
     });
-    widget.bridge.requestMediaStats();
+    if (_tab == SettingsTab.storage) {
+      widget.bridge.requestMediaStats();
+    }
   }
 
   @override
@@ -111,6 +115,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
       builder: (context, snap) {
         final s = snap.data ?? widget.initialSnapshot;
         final prefs = s.prefs;
+        _currentLang = prefs.language;
         final p = WaPalette.forPreset(prefs.darkThemePreset);
         final tr = Tr(prefs.language);
 
@@ -217,7 +222,12 @@ class _SettingsDialogState extends State<SettingsDialog> {
             Padding(
               padding: const EdgeInsets.only(bottom: 3),
               child: InkWell(
-                onTap: () => setState(() => _tab = tab),
+                onTap: () {
+                  setState(() => _tab = tab);
+                  if (tab == SettingsTab.storage && _stats == null) {
+                    widget.bridge.requestMediaStats();
+                  }
+                },
                 borderRadius: BorderRadius.circular(8),
                 child: Container(
                   padding:

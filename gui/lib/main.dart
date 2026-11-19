@@ -478,7 +478,7 @@ class _HomePageState extends State<HomePage> {
         tr: tr,
         initialScope: scope,
         onJump: (chatJid, msgId, query) {
-          if (s.selected != chatJid) {
+          if (s.selected != chatJid || s.message(msgId) == null) {
             widget.bridge.jumpToMessage(chatJid, msgId);
           }
           setState(() {
@@ -499,7 +499,7 @@ class _HomePageState extends State<HomePage> {
         palette: p,
         tr: tr,
         onJump: (chatJid, msgId) {
-          if (s.selected != chatJid) {
+          if (s.selected != chatJid || s.message(msgId) == null) {
             widget.bridge.jumpToMessage(chatJid, msgId);
           }
           setState(() {
@@ -552,8 +552,10 @@ class _HomePageState extends State<HomePage> {
   void _openScheduledManager(Snapshot first, WaPalette p, Tr tr) {
     String nameOf(Snapshot snap, String jid) =>
         snap.chat(jid)?.name ?? snap.contacts[jid] ?? formatJidPhone(jid);
-    String fmt(DateTime at) =>
-        '${at.day}. ${at.month}. ${at.hour.toString().padLeft(2, '0')}:${at.minute.toString().padLeft(2, '0')}';
+    String fmt(DateTime at) {
+      final local = at.toLocal();
+      return '${local.day}. ${local.month}. ${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}';
+    }
 
     showDialog<void>(
       context: context,
@@ -677,7 +679,8 @@ class _HomePageState extends State<HomePage> {
         initialTab: initialTab,
         onOpenUpdate: () {
           Navigator.pop(context);
-          _openUpdate(s, widget.palette, Tr(s.prefs.language));
+          final latest = widget.snapshot ?? s;
+          _openUpdate(latest, widget.palette, Tr(latest.prefs.language));
         },
         onConfirm: _confirm,
       ),

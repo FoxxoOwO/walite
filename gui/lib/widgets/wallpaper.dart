@@ -34,31 +34,34 @@ class WaWallpaper extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final bg = parseHexColor(customColorHex) ?? backgroundColor;
-    final imgFile = (wallpaperPath != null && wallpaperPath!.isNotEmpty)
-        ? File(wallpaperPath!)
-        : null;
-    final hasImage = imgFile != null && imgFile.existsSync();
+    final hasImage = wallpaperPath != null && wallpaperPath!.isNotEmpty;
 
     return Container(
       color: bg,
       child: Stack(
         fit: StackFit.expand,
         children: [
-          if (hasImage) ...[
-            Image.file(
-              imgFile,
-              fit: BoxFit.cover,
-              errorBuilder: (_, _, _) => const SizedBox.shrink(),
+          if (hasImage || showDoodles)
+            Positioned.fill(
+              child: RepaintBoundary(
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    if (hasImage)
+                      Image.file(
+                        File(wallpaperPath!),
+                        fit: BoxFit.cover,
+                        color: Colors.black.withValues(alpha: 0.42),
+                        colorBlendMode: BlendMode.darken,
+                        errorBuilder: (_, _, _) => const SizedBox.shrink(),
+                      ),
+                    if (showDoodles)
+                      const CustomPaint(painter: _WallpaperPainter()),
+                  ],
+                ),
+              ),
             ),
-            Container(color: Colors.black.withValues(alpha: 0.42)),
-          ],
-          if (showDoodles)
-            CustomPaint(
-              painter: _WallpaperPainter(),
-              child: child,
-            )
-          else
-            child,
+          child,
         ],
       ),
     );
@@ -66,6 +69,8 @@ class WaWallpaper extends StatelessWidget {
 }
 
 class _WallpaperPainter extends CustomPainter {
+  const _WallpaperPainter();
+
   @override
   void paint(Canvas canvas, Size size) {
     final stroke = Paint()

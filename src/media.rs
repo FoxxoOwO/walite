@@ -277,8 +277,9 @@ pub fn open_file(path: &Path) {
 pub fn show_in_folder(path: &Path) {
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
         let _ = std::process::Command::new("explorer")
-            .arg(format!("/select,{}", path.display()))
+            .raw_arg(format!("/select,\"{}\"", path.display()))
             .spawn();
     }
     #[cfg(not(windows))]

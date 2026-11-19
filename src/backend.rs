@@ -762,6 +762,16 @@ pub async fn spawn_backend(state: SharedState) -> Result<BackendHandle> {
         loop {
             interval.tick().await;
             let now = chrono::Utc::now();
+            let has_due = {
+                let s = state_for_scheduled.read();
+                s.scheduled_messages.iter().any(|msg| {
+                    msg.status == crate::state::ScheduledStatus::Pending
+                        && msg.scheduled_for <= now
+                })
+            };
+            if !has_due {
+                continue;
+            }
             let due_items: Vec<(String, Jid, String)> = {
                 let mut s = state_for_scheduled.write();
                 let mut due = Vec::new();
@@ -770,6 +780,9 @@ pub async fn spawn_backend(state: SharedState) -> Result<BackendHandle> {
                         msg.status = crate::state::ScheduledStatus::Sent;
                         due.push((msg.id.clone(), msg.chat_jid.clone(), msg.text.clone()));
                     }
+                }
+                if !due.is_empty() {
+                    s.dirty = true;
                 }
                 due
             };
@@ -800,6 +813,7 @@ pub async fn spawn_backend(state: SharedState) -> Result<BackendHandle> {
                         let mut s = state_for_scheduled.write();
                         if let Some(msg) = s.scheduled_messages.iter_mut().find(|m| m.id == id) {
                             msg.status = crate::state::ScheduledStatus::Failed(e.to_string());
+                            s.dirty = true;
                         }
                     }
                 }
@@ -1250,9 +1264,11 @@ async fn handle_incoming_message(
             }
             if desktop {
                 let target_str = state.read().canonical_jid(&chat_jid).to_string();
-                crate::notifications::notify_for_chat(Some(&target_str), &title, &body, sound);
+                tokio::task::spawn_blocking(move || {
+                    crate::notifications::notify_for_chat(Some(&target_str), &title, &body, sound);
+                });
             } else if sound {
-                crate::notifications::play_sound();
+                crate::notifications::play_sound_if_unfocused();
             }
         }
     }
@@ -2198,14 +2214,16 @@ async fn handle_event(
                         "Příchozí hovor"
                     };
                     if desktop {
-                        crate::notifications::notify_for_chat(
-                            Some(&peer_str),
-                            title,
-                            &peer_name,
-                            sound,
-                        );
+                        tokio::task::spawn_blocking(move || {
+                            crate::notifications::notify_for_chat(
+                                Some(&peer_str),
+                                title,
+                                &peer_name,
+                                sound,
+                            );
+                        });
                     } else if sound {
-                        crate::notifications::play_sound();
+                        crate::notifications::play_sound_if_unfocused();
                     }
                 }
                 CallAction::Terminate { reason, .. } => {
@@ -3380,12 +3398,30 @@ async fn handle_command(
         
         Command::DeleteChat { chat_jid } => {
             let res = client.chat_actions().delete_chat(&chat_jid, false, None).await;
-            let mut s = state.write();
-            s.dirty = true;
-            s.chats.remove(&chat_jid);
-            s.messages.remove(&chat_jid);
-            if s.selected_chat.as_ref() == Some(&chat_jid) {
-                s.selected_chat = None;
+            {
+                let mut s = state.write();
+                let canon = s.canonical_jid(&chat_jid);
+                s.dirty = true;
+                s.chats.remove(&canon);
+                s.chats.remove(&chat_jid);
+                s.messages.remove(&canon);
+                s.messages.remove(&chat_jid);
+                s.drafts.remove(&canon);
+                s.drafts.remove(&chat_jid);
+                s.pinned.remove(&canon);
+                s.pinned.remove(&chat_jid);
+                s.ephemeral.remove(&canon);
+                s.ephemeral.remove(&chat_jid);
+                s.history_syncing_chats.remove(&canon);
+                s.history_syncing_chats.remove(&chat_jid);
+                s.history_exhausted_chats.remove(&canon);
+                s.history_exhausted_chats.remove(&chat_jid);
+                if s.selected_chat.as_ref().is_some_and(|sel| {
+                    let sel_canon = s.canonical_jid(sel);
+                    sel == &chat_jid || sel == &canon || sel_canon == canon
+                }) {
+                    s.selected_chat = None;
+                }
             }
             res?;
         }
@@ -3394,10 +3430,28 @@ async fn handle_command(
             let res = client.chat_actions().clear_chat(&chat_jid, false, false, None).await;
             {
                 let mut s = state.write();
+                let canon = s.canonical_jid(&chat_jid);
                 s.dirty = true;
-                if let Some(msgs) = s.messages.get_mut(&chat_jid) {
+                if let Some(msgs) = s.messages.get_mut(&canon) {
                     msgs.clear();
                 }
+                if canon != chat_jid {
+                    if let Some(msgs) = s.messages.get_mut(&chat_jid) {
+                        msgs.clear();
+                    }
+                }
+                if let Some(chat) = s.chats.get_mut(&canon) {
+                    chat.last_message = None;
+                    chat.unread_count = 0;
+                }
+                if canon != chat_jid {
+                    if let Some(chat) = s.chats.get_mut(&chat_jid) {
+                        chat.last_message = None;
+                        chat.unread_count = 0;
+                    }
+                }
+                s.pinned.remove(&canon);
+                s.pinned.remove(&chat_jid);
             }
             res?;
         }
@@ -4159,9 +4213,11 @@ async fn handle_command(
                 }
                 *active_db_path.write().await = new_db_path_str.clone();
 
-                // 5. Delete cached UI state
+                // 5. Delete cached UI state and per-chat message files
                 let ui_state_path = data_dir.join("ui_state.json");
                 let _ = std::fs::remove_file(&ui_state_path);
+                let _ = std::fs::remove_dir_all(data_dir.join("messages"));
+                crate::storage::clear_written_cache();
 
                 // 6. Reset in-memory state
                 {
@@ -4173,6 +4229,17 @@ async fn handle_command(
                     s.messages.clear();
                     s.contacts.clear();
                     s.lid_to_pn.clear();
+                    s.drafts.clear();
+                    s.pinned.clear();
+                    s.ephemeral.clear();
+                    s.group_info.clear();
+                    s.group_info_pending.clear();
+                    s.scheduled_messages.clear();
+                    s.pending_reactions.clear();
+                    s.history_syncing_chats.clear();
+                    s.history_exhausted_chats.clear();
+                    s.active_call = None;
+                    s.search_query.clear();
                     s.selected_chat = None;
                     s.initial_history_fetched = false;
                     s.connection = ConnectionStatus::Connecting;

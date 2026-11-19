@@ -1,9 +1,30 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data' show Uint8List;
 
 import 'package:flutter/painting.dart' show FileImage;
 import 'package:web_socket_channel/web_socket_channel.dart';
+
+String _bareJid(String jid) {
+  final at = jid.indexOf('@');
+  if (at < 0) {
+    final colon = jid.indexOf(':');
+    return colon < 0 ? jid : jid.substring(0, colon);
+  }
+  final user = jid.substring(0, at);
+  final colon = user.indexOf(':');
+  final bareUser = colon < 0 ? user : user.substring(0, colon);
+  return '$bareUser${jid.substring(at)}';
+}
+
+/// True when [a] and [b] represent the same WhatsApp JID regardless of a
+/// `:device` suffix (e.g. `1234@s.whatsapp.net` vs `1234:12@s.whatsapp.net`).
+bool sameJidUser(String? a, String? b) {
+  if (a == null || b == null || a.isEmpty || b.isEmpty) return false;
+  if (a == b) return true;
+  return _bareJid(a) == _bareJid(b);
+}
 
 /// One chat row from the Rust backend's snapshot.
 class ChatItem {
@@ -160,6 +181,23 @@ class Msg {
   /// Full reaction entries including sender JIDs.
   final List<ReactionDetail> reactionDetails;
 
+  Uint8List? _thumbBytes;
+  bool _thumbDecoded = false;
+
+  /// Lazily decoded JPEG thumbnail bytes cached on first access.
+  Uint8List? get thumbBytes {
+    if (!_thumbDecoded) {
+      _thumbDecoded = true;
+      final raw = thumbBase64;
+      if (raw != null && raw.isNotEmpty) {
+        try {
+          _thumbBytes = base64Decode(raw);
+        } catch (_) {}
+      }
+    }
+    return _thumbBytes;
+  }
+
   factory Msg.fromJson(Map<String, dynamic> json) {
     final rawReactions = (json['reactions'] as List<dynamic>? ?? const [])
         .whereType<Map<String, dynamic>>()
@@ -269,7 +307,8 @@ class GroupInfo {
   final int? ephemeral;
   final List<String> participants;
 
-  bool isAdmin(String? jid) => jid != null && admins.contains(jid);
+  bool isAdmin(String? jid) =>
+      jid != null && admins.any((a) => sameJidUser(a, jid));
 
   factory GroupInfo.fromJson(Map<String, dynamic> json) => GroupInfo(
         subject: json['subject'] as String? ?? '',
@@ -885,23 +924,24 @@ class Snapshot {
     );
   }
 
+  Map<String, ChatItem>? _chatByJid;
+  Map<String, Msg>? _msgById;
+
   ChatItem? chat(String? jid) {
     if (jid == null) return null;
-    for (final c in chats) {
-      if (c.jid == jid) return c;
-    }
-    for (final c in archived) {
-      if (c.jid == jid) return c;
-    }
-    return null;
+    final map = _chatByJid ??= {
+      for (final c in archived) c.jid: c,
+      for (final c in chats) c.jid: c,
+    };
+    return map[jid];
   }
 
   Msg? message(String? id) {
     if (id == null) return null;
-    for (final m in messages) {
-      if (m.id == id) return m;
-    }
-    return null;
+    final map = _msgById ??= {
+      for (final m in messages.reversed) m.id: m,
+    };
+    return map[id];
   }
 }
 
@@ -926,6 +966,7 @@ class Bridge {
   Timer? _retry;
   WebSocketChannel? _channel;
   bool _connecting = false;
+  bool _disposed = false;
   int _lastAvatarRev = -1;
   String? _lastSelfAvatar;
 
@@ -945,7 +986,7 @@ class Bridge {
   Stream<List<SearchHit>> get starredMessages => _starredMessages.stream;
 
   void connect() {
-    if (_connecting) return;
+    if (_disposed || _connecting) return;
     _connecting = true;
     try {
       final channel = WebSocketChannel.connect(Uri.parse('ws://127.0.0.1:$port'));
@@ -953,16 +994,22 @@ class Bridge {
       unawaited(
         channel.ready.then(
           (_) {
-            if (_channel == channel) _link.add(true);
+            if (!_disposed && _channel == channel) _link.add(true);
           },
           onError: (_) {
-            if (_channel == channel) _lost();
+            if (!_disposed && _channel == channel) _lost();
           },
         ),
       );
       channel.stream.listen(
         (frame) {
-          final decoded = jsonDecode(frame as String);
+          if (_disposed || frame is! String) return;
+          final Object? decoded;
+          try {
+            decoded = jsonDecode(frame);
+          } catch (_) {
+            return;
+          }
           if (decoded is! Map<String, dynamic>) return;
           switch (decoded['type']) {
             case 'snapshot':
@@ -1009,10 +1056,10 @@ class Bridge {
           }
         },
         onDone: () {
-          if (_channel == channel) _lost();
+          if (!_disposed && _channel == channel) _lost();
         },
         onError: (_) {
-          if (_channel == channel) _lost();
+          if (!_disposed && _channel == channel) _lost();
         },
       );
     } catch (_) {
@@ -1023,13 +1070,17 @@ class Bridge {
   void _lost() {
     _connecting = false;
     _channel = null;
+    if (_disposed) return;
     _link.add(false);
     _retry?.cancel();
     _retry = Timer(const Duration(seconds: 1), connect);
   }
 
   void _send(Map<String, Object?> message) {
-    _channel?.sink.add(jsonEncode(message));
+    if (_disposed) return;
+    try {
+      _channel?.sink.add(jsonEncode(message));
+    } catch (_) {}
   }
 
   void reconnectBackend() => _send({'type': 'connect'});
@@ -1305,7 +1356,9 @@ class Bridge {
   void cancelHistorySync() => _send({'type': 'cancel_history_sync'});
 
   void dispose() {
+    _disposed = true;
     _retry?.cancel();
+    _retry = null;
     _snapshots.close();
     _link.close();
     _searchResults.close();
@@ -1317,7 +1370,8 @@ class Bridge {
     _windowActivations.close();
     _profileResults.close();
     _starredMessages.close();
-    _channel?.sink.close();
+    unawaited(_channel?.sink.close());
+    _channel = null;
   }
 
   void _evictAvatarCaches(Snapshot snap) {

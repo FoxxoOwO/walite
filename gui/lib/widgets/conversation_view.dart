@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
@@ -59,6 +58,10 @@ class ConversationView extends StatefulWidget {
 }
 
 class ConversationViewState extends State<ConversationView> {
+  static final _alnumRegex = RegExp(r'[A-Za-z0-9]');
+  static final _wsRegex = RegExp(r'\s');
+  static final _nonDigitRegex = RegExp(r'\D');
+
   final _composerCtrl = TextEditingController();
   final _composerFocus = FocusNode();
   final _scrollCtrl = ScrollController();
@@ -86,6 +89,8 @@ class ConversationViewState extends State<ConversationView> {
 
   String? _flashMessageId;
   Timer? _flashTimer;
+  String? _pendingScrollMsgId;
+  String? _pendingScrollChat;
   String? _lastSelectedChat;
   StreamSubscription<ClipboardImageResult>? _clipSub;
   StreamSubscription<List<String>>? _dropSub;
@@ -136,8 +141,17 @@ class ConversationViewState extends State<ConversationView> {
     if (widget.jumpMessageId != null &&
         widget.jumpMessageId != oldWidget.jumpMessageId) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        jumpToMessage(widget.jumpMessageId!);
+        if (mounted) jumpToMessage(widget.jumpMessageId!);
         widget.onJumpHandled?.call();
+      });
+    } else if (_pendingScrollMsgId != null &&
+        widget.snapshot.selected == _pendingScrollChat &&
+        widget.snapshot.message(_pendingScrollMsgId) != null) {
+      final target = _pendingScrollMsgId!;
+      _pendingScrollMsgId = null;
+      _pendingScrollChat = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) jumpToMessage(target);
       });
     }
   }
@@ -148,8 +162,17 @@ class ConversationViewState extends State<ConversationView> {
       widget.bridge.sendTyping(prev, false);
       _typingActive = false;
     }
+    _draftTimer?.cancel();
+    _typingTimer?.cancel();
+    if (_recording) {
+      _recTimer?.cancel();
+      widget.bridge.recordCancel();
+      _recording = false;
+      _recSecs = 0;
+    }
     _lastSelectedChat = s.selected;
     _selectedMsgIds.clear();
+    _multiPollDrafts.clear();
     _reply = null;
     _editingMessageId = null;
     _pendingAttachmentPath = null;
@@ -159,6 +182,10 @@ class ConversationViewState extends State<ConversationView> {
     _showStickerPicker = false;
     _reactionPickerTargetId = null;
     _msgKeys.clear();
+    if (s.selected != _pendingScrollChat) {
+      _pendingScrollMsgId = null;
+      _pendingScrollChat = null;
+    }
     final draft = s.selected != null ? s.chat(s.selected)?.draft : null;
     _composerCtrl.text = draft ?? '';
     _composerCtrl.selection =
@@ -192,6 +219,8 @@ class ConversationViewState extends State<ConversationView> {
     if (chat == null) return;
     final idx = widget.snapshot.messages.indexWhere((m) => m.id == id);
     if (idx == -1) {
+      _pendingScrollMsgId = id;
+      _pendingScrollChat = chat;
       widget.bridge.jumpToMessage(chat, id);
       setState(() => _flashMessageId = id);
       return;
@@ -258,6 +287,7 @@ class ConversationViewState extends State<ConversationView> {
     if (_pendingAttachmentPath != null) {
       setState(() {
         _pendingAttachmentPath = null;
+        _extraAttachments.clear();
         _sendViewOnce = false;
       });
       return true;
@@ -1177,7 +1207,7 @@ class ConversationViewState extends State<ConversationView> {
     }
 
     final file = msg.mediaPath != null ? File(msg.mediaPath!) : null;
-    final hasFile = file != null && file.existsSync();
+    final hasFile = msg.downloaded && file != null;
 
     switch (msg.media) {
       case 'sticker':
@@ -1185,7 +1215,18 @@ class ConversationViewState extends State<ConversationView> {
           return SizedBox(
             width: 140,
             height: 140,
-            child: Image.file(file, fit: BoxFit.contain),
+            child: Image.file(
+              file,
+              fit: BoxFit.contain,
+              cacheWidth: 280,
+              errorBuilder: (_, _, _) => _downloadTile(
+                chatJid,
+                msg,
+                Icons.sticky_note_2_outlined,
+                tr.t('Samolepka', 'Sticker'),
+                tr,
+              ),
+            ),
           );
         }
         return _downloadTile(chatJid, msg, Icons.sticky_note_2_outlined,
@@ -1194,11 +1235,21 @@ class ConversationViewState extends State<ConversationView> {
       case 'image':
         Widget? img;
         if (hasFile) {
-          img = Image.file(file, fit: BoxFit.cover);
-        } else if (msg.thumbBase64 != null) {
-          try {
-            img = Image.memory(base64Decode(msg.thumbBase64!), fit: BoxFit.cover);
-          } catch (_) {}
+          img = Image.file(
+            file,
+            fit: BoxFit.cover,
+            cacheWidth: 560,
+            errorBuilder: (_, _, _) => const Icon(
+              Icons.broken_image_outlined,
+              size: 38,
+              color: WaPalette.textSecondary,
+            ),
+          );
+        } else {
+          final tb = msg.thumbBytes;
+          if (tb != null) {
+            img = Image.memory(tb, fit: BoxFit.cover);
+          }
         }
         return Padding(
           padding: const EdgeInsets.only(bottom: 4),
@@ -1269,12 +1320,9 @@ class ConversationViewState extends State<ConversationView> {
         );
 
       case 'video':
-        Widget? thumb;
-        if (msg.thumbBase64 != null) {
-          try {
-            thumb = Image.memory(base64Decode(msg.thumbBase64!), fit: BoxFit.cover);
-          } catch (_) {}
-        }
+        final tb = msg.thumbBytes;
+        final Widget? thumb =
+            tb != null ? Image.memory(tb, fit: BoxFit.cover) : null;
         final isGif = msg.gifPlayback;
         return Padding(
           padding: const EdgeInsets.only(bottom: 4),
@@ -1794,7 +1842,7 @@ class ConversationViewState extends State<ConversationView> {
                             final digits = (card.waid != null &&
                                     card.waid!.isNotEmpty)
                                 ? card.waid!
-                                : card.phone.replaceAll(RegExp(r'\D'), '');
+                                : card.phone.replaceAll(_nonDigitRegex, '');
                             if (digits.isNotEmpty) {
                               widget.bridge.startChat(digits);
                             }
@@ -1839,90 +1887,14 @@ class ConversationViewState extends State<ConversationView> {
     );
   }
 
-  /// Appends plain text with optional case-insensitive search-query highlighting.
-  void _appendPlainHighlighted(
-    List<InlineSpan> spans,
-    String segment,
-    String queryLower,
-  ) {
-    if (queryLower.isEmpty || segment.isEmpty) {
-      spans.add(TextSpan(text: segment));
-      return;
-    }
-    final segLower = segment.toLowerCase();
-    var pos = 0;
-    while (pos < segment.length) {
-      final hit = segLower.indexOf(queryLower, pos);
-      if (hit < 0) {
-        spans.add(TextSpan(text: segment.substring(pos)));
-        break;
-      }
-      if (hit > pos) {
-        spans.add(TextSpan(text: segment.substring(pos, hit)));
-      }
-      spans.add(
-        TextSpan(
-          text: segment.substring(hit, hit + queryLower.length),
-          style: TextStyle(
-            backgroundColor: WaPalette.accentBright.withValues(alpha: 0.35),
-            color: WaPalette.textPrimary,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      );
-      pos = hit + queryLower.length;
-    }
-  }
-
   /// Renders plain text with highlighted `@mentions`, clickable `http(s)` URLs
   /// and active search-match highlights.
   Widget _messageText(String text, {required double fontSize}) {
-    final pattern = RegExp(r'(https?://[^\s<>"\)\]\},;]+|@\S+)');
-    final queryLower = (widget.highlightQuery ?? '').trim().toLowerCase();
-    final spans = <InlineSpan>[];
-    var cursor = 0;
-    for (final m in pattern.allMatches(text)) {
-      if (m.start > cursor) {
-        _appendPlainHighlighted(
-          spans,
-          text.substring(cursor, m.start),
-          queryLower,
-        );
-      }
-      final token = m.group(0)!;
-      final isUrl = token.startsWith('http://') || token.startsWith('https://');
-      final isHit = queryLower.isNotEmpty &&
-          token.toLowerCase().contains(queryLower);
-      spans.add(
-        TextSpan(
-          text: token,
-          style: TextStyle(
-            color: WaPalette.linkBlue,
-            decoration: isUrl ? TextDecoration.underline : null,
-            backgroundColor: isHit
-                ? WaPalette.accentBright.withValues(alpha: 0.35)
-                : null,
-          ),
-          recognizer: isUrl
-              ? (TapGestureRecognizer()
-                ..onTap = () => widget.bridge.openFile(token))
-              : null,
-        ),
-      );
-      cursor = m.end;
-    }
-    if (cursor < text.length) {
-      _appendPlainHighlighted(spans, text.substring(cursor), queryLower);
-    }
-    return SelectableText.rich(
-      TextSpan(
-        style: TextStyle(
-          fontSize: fontSize,
-          height: 1.32,
-          color: WaPalette.textPrimary,
-        ),
-        children: spans,
-      ),
+    return _MessageRichText(
+      text: text,
+      fontSize: fontSize,
+      highlightQuery: widget.highlightQuery,
+      onOpenUrl: widget.bridge.openFile,
     );
   }
 
@@ -1936,17 +1908,6 @@ class ConversationViewState extends State<ConversationView> {
     final pendingSched = s.scheduled
         .where((m) => m.chat == chatJid && m.status == 'pending')
         .length;
-    final mentionQuery = _activeMentionQuery(_composerCtrl.text);
-    final mentionCandidates = mentionQuery != null && (chat?.group ?? false)
-        ? (s.group?.participants ?? const <String>[])
-            .where((j) => j != s.self)
-            .map((j) => (j, _nameOf(s, j)))
-            .where((pair) =>
-                mentionQuery.isEmpty ||
-                pair.$2.toLowerCase().contains(mentionQuery.toLowerCase()))
-            .take(6)
-            .toList()
-        : <(String, String)>[];
 
     return Container(
       color: p.surface,
@@ -2005,45 +1966,64 @@ class ConversationViewState extends State<ConversationView> {
             ),
           if (_pendingAttachmentPath != null)
             _attachmentBanner(p, tr),
-          if (mentionCandidates.isNotEmpty)
-            Container(
-              margin: const EdgeInsets.only(bottom: 6),
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              decoration: BoxDecoration(
-                color: p.bg,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Row(
-                children: [
-                  const Text('@',
-                      style: TextStyle(
-                          color: WaPalette.accent,
-                          fontWeight: FontWeight.bold)),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Wrap(
-                      spacing: 6,
-                      children: [
-                        for (final (_, name) in mentionCandidates)
-                          ActionChip(
-                            label: Text(name,
-                                style: const TextStyle(fontSize: 12)),
-                            visualDensity: VisualDensity.compact,
-                            onPressed: () {
-                              final updated =
-                                  _applyMention(_composerCtrl.text, name);
-                              _composerCtrl.text = updated;
-                              _composerCtrl.selection =
-                                  TextSelection.collapsed(
-                                      offset: updated.length);
-                              _onComposerChanged(chatJid, updated);
-                            },
-                          ),
-                      ],
-                    ),
+          if (chat?.group ?? false)
+            ValueListenableBuilder<TextEditingValue>(
+              valueListenable: _composerCtrl,
+              builder: (_, val, _) {
+                final mentionQuery = _activeMentionQuery(val.text);
+                if (mentionQuery == null) return const SizedBox.shrink();
+                final lowerQuery = mentionQuery.toLowerCase();
+                final mentionCandidates =
+                    (s.group?.participants ?? const <String>[])
+                        .where((j) => !sameJidUser(j, s.self))
+                        .map((j) => (j, _nameOf(s, j)))
+                        .where((pair) =>
+                            lowerQuery.isEmpty ||
+                            pair.$2.toLowerCase().contains(lowerQuery))
+                        .take(6)
+                        .toList();
+                if (mentionCandidates.isEmpty) return const SizedBox.shrink();
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 6),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: p.bg,
+                    borderRadius: BorderRadius.circular(8),
                   ),
-                ],
-              ),
+                  child: Row(
+                    children: [
+                      const Text('@',
+                          style: TextStyle(
+                              color: WaPalette.accent,
+                              fontWeight: FontWeight.bold)),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Wrap(
+                          spacing: 6,
+                          children: [
+                            for (final (_, name) in mentionCandidates)
+                              ActionChip(
+                                label: Text(name,
+                                    style: const TextStyle(fontSize: 12)),
+                                visualDensity: VisualDensity.compact,
+                                onPressed: () {
+                                  final updated =
+                                      _applyMention(_composerCtrl.text, name);
+                                  _composerCtrl.text = updated;
+                                  _composerCtrl.selection =
+                                      TextSelection.collapsed(
+                                          offset: updated.length);
+                                  _onComposerChanged(chatJid, updated);
+                                },
+                              ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
             ),
           if (_recording)
             _recordingBar(chatJid, tr)
@@ -2109,7 +2089,12 @@ class ConversationViewState extends State<ConversationView> {
     final file = File(path);
     final ext = name.split('.').last.toLowerCase();
     final isImg = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'].contains(ext);
-    final size = file.existsSync() ? formatBytes(file.lengthSync()) : '';
+    late final String size;
+    try {
+      size = formatBytes(file.lengthSync());
+    } catch (_) {
+      size = '';
+    }
 
     return Container(
       margin: const EdgeInsets.only(bottom: 6),
@@ -2120,10 +2105,18 @@ class ConversationViewState extends State<ConversationView> {
       ),
       child: Row(
         children: [
-          if (isImg && file.existsSync())
+          if (isImg)
             ClipRRect(
               borderRadius: BorderRadius.circular(6),
-              child: Image.file(file, width: 42, height: 42, fit: BoxFit.cover),
+              child: Image.file(
+                file,
+                width: 42,
+                height: 42,
+                cacheWidth: 84,
+                fit: BoxFit.cover,
+                errorBuilder: (_, _, _) =>
+                    const Icon(Icons.attach_file, color: WaPalette.accent),
+              ),
             )
           else
             const Icon(Icons.attach_file, color: WaPalette.accent),
@@ -2237,9 +2230,6 @@ class ConversationViewState extends State<ConversationView> {
   }
 
   Widget _composerRow(Snapshot s, String chatJid, WaPalette p, Tr tr) {
-    final canSend = _pendingAttachmentPath != null ||
-        _composerCtrl.text.trim().isNotEmpty;
-
     return Row(
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
@@ -2339,28 +2329,35 @@ class ConversationViewState extends State<ConversationView> {
           icon: const Icon(Icons.schedule, color: WaPalette.textSecondary),
           tooltip: tr.t('Naplánovat zprávu', 'Schedule message'),
         ),
-        if (canSend)
-          IconButton.filled(
-            onPressed: () => _submit(s, chatJid),
-            style: IconButton.styleFrom(
-              backgroundColor: WaPalette.accent,
-              foregroundColor: Colors.black,
-            ),
-            icon: const Icon(Icons.send, size: 20),
-            tooltip: tr.t('Odeslat', 'Send'),
-          )
-        else
-          IconButton(
-            onPressed: _recordStart,
-            icon: const Icon(Icons.mic, color: WaPalette.textSecondary),
-            tooltip: tr.t('Nahrát hlasovou zprávu', 'Record voice message'),
-          ),
+        ValueListenableBuilder<TextEditingValue>(
+          valueListenable: _composerCtrl,
+          builder: (_, val, _) {
+            final canSend =
+                _pendingAttachmentPath != null || val.text.trim().isNotEmpty;
+            return canSend
+                ? IconButton.filled(
+                    onPressed: () => _submit(s, chatJid),
+                    style: IconButton.styleFrom(
+                      backgroundColor: WaPalette.accent,
+                      foregroundColor: Colors.black,
+                    ),
+                    icon: const Icon(Icons.send, size: 20),
+                    tooltip: tr.t('Odeslat', 'Send'),
+                  )
+                : IconButton(
+                    onPressed: _recordStart,
+                    icon:
+                        const Icon(Icons.mic, color: WaPalette.textSecondary),
+                    tooltip: tr.t(
+                        'Nahrát hlasovou zprávu', 'Record voice message'),
+                  );
+          },
+        ),
       ],
     );
   }
 
   void _onComposerChanged(String chatJid, String text) {
-    setState(() {});
     _draftTimer?.cancel();
     _draftTimer = Timer(const Duration(milliseconds: 350), () {
       widget.bridge.saveDraft(chatJid, text);
@@ -2466,7 +2463,7 @@ class ConversationViewState extends State<ConversationView> {
   }
 
   Future<void> _schedule(String chatJid, String chatName) async {
-    await showDialog<void>(
+    final scheduled = await showDialog<bool>(
       context: context,
       builder: (_) => ScheduleMessageDialog(
         chatJid: chatJid,
@@ -2477,9 +2474,13 @@ class ConversationViewState extends State<ConversationView> {
         tr: widget.tr,
       ),
     );
-    if (mounted && _composerCtrl.text.trim().isNotEmpty) {
-      _composerCtrl.clear();
-      setState(() {});
+    if (mounted && scheduled == true) {
+      _draftTimer?.cancel();
+      widget.bridge.saveDraft(chatJid, '');
+      if (_composerCtrl.text.trim().isNotEmpty) {
+        _composerCtrl.clear();
+        setState(() {});
+      }
     }
   }
 
@@ -2521,7 +2522,7 @@ class ConversationViewState extends State<ConversationView> {
                             icon: const Icon(Icons.remove_circle_outline,
                                 size: 18),
                             onPressed: () =>
-                                setLocal(() => options.removeAt(i)),
+                                setLocal(() => options.removeAt(i).dispose()),
                           ),
                       ],
                     ),
@@ -2754,7 +2755,7 @@ class ConversationViewState extends State<ConversationView> {
   ) async {
     final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
     final isPinned = s.pinnedMessage?.id == msg.id;
-    final hasFile = msg.mediaPath != null && File(msg.mediaPath!).existsSync();
+    final hasFile = msg.downloaded && msg.mediaPath != null;
     final myEmoji = _myReactionEmoji(s, msg);
 
     final choice = await showMenu<String>(
@@ -2861,7 +2862,10 @@ class ConversationViewState extends State<ConversationView> {
         });
         _composerFocus.requestFocus();
       case 'copy':
-        Clipboard.setData(ClipboardData(text: msg.text));
+        final copyText = (msg.text.isNotEmpty && !_isRedundantMediaLabel(msg))
+            ? msg.text
+            : (msg.caption ?? msg.text);
+        Clipboard.setData(ClipboardData(text: copyText));
       case 'forward':
         _forwardIds(s, chatJid, [msg.id]);
       case 'star':
@@ -2936,7 +2940,7 @@ class ConversationViewState extends State<ConversationView> {
 
   int? _countEmojiOnly(String text) {
     final trimmed = text.trim();
-    if (trimmed.isEmpty || trimmed.contains(RegExp(r'[A-Za-z0-9]'))) {
+    if (trimmed.isEmpty || trimmed.contains(_alnumRegex)) {
       return null;
     }
     final clusters = trimmed.characters
@@ -2952,7 +2956,7 @@ class ConversationViewState extends State<ConversationView> {
     if (idx == -1) return null;
     if (idx > 0 && text[idx - 1].trim().isNotEmpty) return null;
     final tail = text.substring(idx + 1);
-    if (tail.contains(RegExp(r'\s'))) return null;
+    if (tail.contains(_wsRegex)) return null;
     return tail;
   }
 
@@ -3222,5 +3226,148 @@ class _ReactionMenuEntryState extends State<_ReactionMenuEntry> {
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
       child: widget.child,
     );
+  }
+}
+
+class _MessageRichText extends StatefulWidget {
+  const _MessageRichText({
+    required this.text,
+    required this.fontSize,
+    required this.highlightQuery,
+    required this.onOpenUrl,
+  });
+
+  final String text;
+  final double fontSize;
+  final String? highlightQuery;
+  final ValueChanged<String> onOpenUrl;
+
+  @override
+  State<_MessageRichText> createState() => _MessageRichTextState();
+}
+
+class _MessageRichTextState extends State<_MessageRichText> {
+  static final _tokenRegex = RegExp(r'(https?://[^\s<>"\)\]\},;]+|@\S+)');
+
+  final List<TapGestureRecognizer> _recognizers = [];
+  late TextSpan _rootSpan;
+
+  @override
+  void initState() {
+    super.initState();
+    _rebuildSpan();
+  }
+
+  @override
+  void didUpdateWidget(covariant _MessageRichText oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.text != widget.text ||
+        oldWidget.fontSize != widget.fontSize ||
+        oldWidget.highlightQuery != widget.highlightQuery) {
+      _rebuildSpan();
+    }
+  }
+
+  @override
+  void dispose() {
+    _disposeRecognizers();
+    super.dispose();
+  }
+
+  void _disposeRecognizers() {
+    for (final r in _recognizers) {
+      r.dispose();
+    }
+    _recognizers.clear();
+  }
+
+  void _appendPlainHighlighted(
+    List<InlineSpan> spans,
+    String segment,
+    String queryLower,
+  ) {
+    if (queryLower.isEmpty || segment.isEmpty) {
+      spans.add(TextSpan(text: segment));
+      return;
+    }
+    final segLower = segment.toLowerCase();
+    var pos = 0;
+    while (pos < segment.length) {
+      final hit = segLower.indexOf(queryLower, pos);
+      if (hit < 0) {
+        spans.add(TextSpan(text: segment.substring(pos)));
+        break;
+      }
+      if (hit > pos) {
+        spans.add(TextSpan(text: segment.substring(pos, hit)));
+      }
+      spans.add(
+        TextSpan(
+          text: segment.substring(hit, hit + queryLower.length),
+          style: TextStyle(
+            backgroundColor: WaPalette.accentBright.withValues(alpha: 0.35),
+            color: WaPalette.textPrimary,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      );
+      pos = hit + queryLower.length;
+    }
+  }
+
+  void _rebuildSpan() {
+    _disposeRecognizers();
+    final text = widget.text;
+    final queryLower = (widget.highlightQuery ?? '').trim().toLowerCase();
+    final spans = <InlineSpan>[];
+    var cursor = 0;
+    for (final m in _tokenRegex.allMatches(text)) {
+      if (m.start > cursor) {
+        _appendPlainHighlighted(
+          spans,
+          text.substring(cursor, m.start),
+          queryLower,
+        );
+      }
+      final token = m.group(0)!;
+      final isUrl = token.startsWith('http://') || token.startsWith('https://');
+      final isHit =
+          queryLower.isNotEmpty && token.toLowerCase().contains(queryLower);
+      TapGestureRecognizer? recognizer;
+      if (isUrl) {
+        recognizer = TapGestureRecognizer()..onTap = () => widget.onOpenUrl(token);
+        _recognizers.add(recognizer);
+      }
+      spans.add(
+        TextSpan(
+          text: token,
+          style: TextStyle(
+            color: WaPalette.linkBlue,
+            decoration: isUrl ? TextDecoration.underline : null,
+            backgroundColor: isHit
+                ? WaPalette.accentBright.withValues(alpha: 0.35)
+                : null,
+          ),
+          recognizer: recognizer,
+        ),
+      );
+      cursor = m.end;
+    }
+    if (cursor < text.length) {
+      _appendPlainHighlighted(spans, text.substring(cursor), queryLower);
+    }
+    _rootSpan = TextSpan(
+      style: TextStyle(
+        fontSize: widget.fontSize,
+        height: 1.32,
+        color: WaPalette.textPrimary,
+      ),
+      children: spans,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SelectableText.rich(_rootSpan);
   }
 }

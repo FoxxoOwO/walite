@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:material_ui/material_ui.dart';
 
 import '../bridge.dart';
@@ -61,12 +63,20 @@ class ChatListPanel extends StatefulWidget {
 class _ChatListPanelState extends State<ChatListPanel> {
   ChatFilter _filter = ChatFilter.all;
   bool _archivedExpanded = false;
+  Timer? _searchDebounce;
+
+  @override
+  void dispose() {
+    _searchDebounce?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final s = widget.snapshot;
     final p = widget.palette;
     final tr = widget.tr;
+    final now = DateTime.now();
     final inArchive = widget.section == RailSection.archived;
     final unreadTotal = s.chats.fold<int>(0, (sum, c) => sum + c.unread);
 
@@ -78,6 +88,14 @@ class _ChatListPanelState extends State<ChatListPanel> {
         ChatFilter.groups => c.group,
       };
     }).toList();
+
+    final showArchiveHeader =
+        !inArchive && s.archived.isNotEmpty && _filter == ChatFilter.all;
+    final showExpandedArchived = showArchiveHeader && _archivedExpanded;
+    final archivedOffset = showArchiveHeader ? 1 : 0;
+    final expandedCount = showExpandedArchived ? s.archived.length : 0;
+    final bodyCount = filtered.isEmpty ? 1 : filtered.length;
+    final itemCount = archivedOffset + expandedCount + bodyCount;
 
     return Container(
       width: 348,
@@ -94,21 +112,22 @@ class _ChatListPanelState extends State<ChatListPanel> {
           if (!inArchive) _buildFilterChips(p, tr),
           const SizedBox(height: 4),
           Expanded(
-            child: ListView(
-              children: [
-                if (!inArchive &&
-                    s.archived.isNotEmpty &&
-                    _filter == ChatFilter.all)
-                  _buildArchivedRow(s, p, tr),
-                if (!inArchive &&
-                    _archivedExpanded &&
-                    _filter == ChatFilter.all)
-                  for (final chat in s.archived) _chatTile(s, chat, p, tr),
-                if (filtered.isEmpty)
-                  _buildEmpty(inArchive, tr)
-                else
-                  for (final chat in filtered) _chatTile(s, chat, p, tr),
-              ],
+            child: ListView.builder(
+              itemCount: itemCount,
+              itemBuilder: (_, index) {
+                if (showArchiveHeader && index == 0) {
+                  return _buildArchivedRow(s, p, tr);
+                }
+                final rem = index - archivedOffset;
+                if (rem < expandedCount) {
+                  return _chatTile(s, s.archived[rem], p, tr, now);
+                }
+                final bodyIdx = rem - expandedCount;
+                if (filtered.isEmpty) {
+                  return _buildEmpty(inArchive, tr);
+                }
+                return _chatTile(s, filtered[bodyIdx], p, tr, now);
+              },
             ),
           ),
         ],
@@ -289,7 +308,10 @@ class _ChatListPanelState extends State<ChatListPanel> {
         controller: widget.searchController,
         onChanged: (q) {
           setState(() {});
-          widget.bridge.search(q);
+          _searchDebounce?.cancel();
+          _searchDebounce = Timer(const Duration(milliseconds: 120), () {
+            if (mounted) widget.bridge.search(q);
+          });
         },
         style: const TextStyle(fontSize: 14, color: WaPalette.textPrimary),
         decoration: InputDecoration(
@@ -301,6 +323,7 @@ class _ChatListPanelState extends State<ChatListPanel> {
               ? IconButton(
                   icon: const Icon(Icons.close, size: 16),
                   onPressed: () {
+                    _searchDebounce?.cancel();
                     widget.searchController.clear();
                     setState(() {});
                     widget.bridge.search('');
@@ -438,7 +461,13 @@ class _ChatListPanelState extends State<ChatListPanel> {
     );
   }
 
-  Widget _chatTile(Snapshot snapshot, ChatItem chat, WaPalette p, Tr tr) {
+  Widget _chatTile(
+    Snapshot snapshot,
+    ChatItem chat,
+    WaPalette p,
+    Tr tr,
+    DateTime now,
+  ) {
     final selected = chat.jid == snapshot.selected;
     final online = snapshot.presence[chat.jid]?.online ?? false;
     final displayName = chat.name.isEmpty ? formatJidPhone(chat.jid) : chat.name;
@@ -482,7 +511,7 @@ class _ChatListPanelState extends State<ChatListPanel> {
                     ),
                     const SizedBox(width: 6),
                     Text(
-                      _formatTime(chat.last?.ts ?? 0, tr),
+                      _formatTime(chat.last?.ts ?? 0, tr, now),
                       style: TextStyle(
                         fontSize: 11.5,
                         color: chat.unread > 0
@@ -619,10 +648,9 @@ class _ChatListPanelState extends State<ChatListPanel> {
     return '$icon $text';
   }
 
-  String _formatTime(int millis, Tr tr) {
+  String _formatTime(int millis, Tr tr, DateTime now) {
     if (millis == 0) return '';
     final t = DateTime.fromMillisecondsSinceEpoch(millis);
-    final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final day = DateTime(t.year, t.month, t.day);
     final diff = today.difference(day).inDays;

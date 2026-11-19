@@ -5,10 +5,13 @@ const REG_APP_NAME: &str = "WaLite";
 pub fn is_autostart_enabled() -> bool {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         use std::process::Command;
-        // Query HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v Warust
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // Query HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v WaLite
         let output = Command::new("reg")
             .args(["query", &format!(r"HKCU\{}", REG_KEY_PATH), "/v", REG_APP_NAME])
+            .creation_flags(CREATE_NO_WINDOW)
             .output();
 
         if let Ok(out) = output {

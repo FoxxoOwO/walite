@@ -13,7 +13,7 @@
 use anyhow::Result;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 use whatsapp_rust::wacore_binary::Jid;
@@ -55,10 +55,28 @@ struct PersistedMessages {
     messages: Vec<Message>,
 }
 
+#[derive(Serialize)]
+struct PersistedMessagesRef<'a> {
+    jid: &'a str,
+    messages: &'a [Message],
+}
+
+/// Serializes concurrent persist passes so `.json.tmp` writes and renames never
+/// race across tasks on Windows.
+static PERSIST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 /// Hash of the bytes last written per path. Lets a persist pass skip files whose
 /// content did not change, which is what keeps writes proportional to activity
 /// instead of to total history size.
 static WRITTEN: Mutex<Option<HashMap<PathBuf, u64>>> = Mutex::new(None);
+
+/// Forget remembered write hashes (e.g., on logout when persisted files are wiped).
+pub fn clear_written_cache() {
+    if let Some(map) = WRITTEN.lock().as_mut() {
+        map.clear();
+    }
+}
 
 /// FNV-1a: enough to detect changes, and avoids pulling in a hashing crate.
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -128,8 +146,13 @@ impl Store {
     }
 
     pub async fn persist(&self, state: &SharedState, only_if_dirty: bool) -> Result<()> {
-        // Snapshot under the lock, write outside it: serializing two megabytes
-        // while holding the state write lock would freeze the UI.
+        if only_if_dirty && !state.read().dirty {
+            return Ok(());
+        }
+        let _persist_guard = PERSIST_LOCK.lock().await;
+
+        // Snapshot under the lock, serialize & write outside it: serializing
+        // megabytes while holding the state write lock would freeze the UI.
         let (core, history) = {
             let mut s = state.write();
             if only_if_dirty && !s.dirty {
@@ -174,7 +197,7 @@ impl Store {
             (core, history)
         };
 
-        let result = self.write_all(&core, &history).await;
+        let result = self.write_all(core, history).await;
         if let Err(e) = result {
             // Nothing reached disk for at least one file, so try again next tick.
             state.write().dirty = true;
@@ -186,23 +209,31 @@ impl Store {
 
     async fn write_all(
         &self,
-        core: &PersistedAppState,
-        history: &[(String, Vec<Message>)],
+        core: PersistedAppState,
+        history: Vec<(String, Vec<Message>)>,
     ) -> Result<()> {
+        let messages_dir = self.messages_dir();
+        let messages_dir_for_ser = messages_dir.clone();
+        let (core_bytes, chat_payloads, expected) =
+            tokio::task::spawn_blocking(move || -> Result<_> {
+                let core_bytes = serde_json::to_vec(&core)?;
+                let mut chat_payloads = Vec::with_capacity(history.len());
+                let mut expected: HashSet<PathBuf> = HashSet::with_capacity(history.len());
+                for (jid, messages) in &history {
+                    let path = messages_dir_for_ser.join(Self::chat_file_name(jid));
+                    expected.insert(path.clone());
+                    let bytes = serde_json::to_vec(&PersistedMessagesRef { jid, messages })?;
+                    chat_payloads.push((path, bytes));
+                }
+                Ok((core_bytes, chat_payloads, expected))
+            })
+            .await??;
+
         tokio::fs::create_dir_all(&self.dir).await?;
-        let core_bytes = serde_json::to_vec(core)?;
         write_if_changed(&self.state_path(), &core_bytes).await?;
 
-        let messages_dir = self.messages_dir();
         tokio::fs::create_dir_all(&messages_dir).await?;
-        let mut expected: Vec<PathBuf> = Vec::with_capacity(history.len());
-        for (jid, messages) in history {
-            let path = messages_dir.join(Self::chat_file_name(jid));
-            expected.push(path.clone());
-            let bytes = serde_json::to_vec(&PersistedMessages {
-                jid: jid.clone(),
-                messages: messages.clone(),
-            })?;
+        for (path, bytes) in chat_payloads {
             write_if_changed(&path, &bytes).await?;
         }
 

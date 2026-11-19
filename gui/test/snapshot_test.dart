@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:warust_gui/bridge.dart';
 
@@ -435,5 +437,101 @@ void main() {
     expect(m.contactCards, hasLength(1));
     expect(m.contactCards.single.name, 'Petr Novák');
     expect(m.contactCards.single.waid, '420602123456');
+  });
+
+  test('sameJidUser and GroupInfo.isAdmin ignore :device suffix', () {
+    expect(sameJidUser('420123@s.whatsapp.net', '420123@s.whatsapp.net'), isTrue);
+    expect(sameJidUser('420123@s.whatsapp.net', '420123:12@s.whatsapp.net'), isTrue);
+    expect(sameJidUser('420123:1@s.whatsapp.net', '420123:2@s.whatsapp.net'), isTrue);
+    expect(sameJidUser('420123@s.whatsapp.net', '420999@s.whatsapp.net'), isFalse);
+    expect(sameJidUser('420123@s.whatsapp.net', '420123@lid'), isFalse);
+    expect(sameJidUser(null, '420123@s.whatsapp.net'), isFalse);
+    expect(sameJidUser('', '420123@s.whatsapp.net'), isFalse);
+
+    final group = GroupInfo.fromJson({
+      'subject': 'Team',
+      'admins': ['420111@s.whatsapp.net'],
+    });
+    expect(group.isAdmin('420111:7@s.whatsapp.net'), isTrue);
+    expect(group.isAdmin('420111@s.whatsapp.net'), isTrue);
+    expect(group.isAdmin('420222@s.whatsapp.net'), isFalse);
+  });
+
+  test('Msg.thumbBytes decodes lazily, caches bytes, and handles invalid base64', () {
+    final valid = base64Encode([1, 2, 3, 4]);
+    final msg = Msg.fromJson({
+      'id': 'M1',
+      'text': '',
+      'ts': 1,
+      'from_me': false,
+      'sender': '1@s.whatsapp.net',
+      'thumb': valid,
+    });
+    final decoded = msg.thumbBytes;
+    expect(decoded, [1, 2, 3, 4]);
+    expect(identical(msg.thumbBytes, decoded), isTrue);
+
+    final invalid = Msg.fromJson({
+      'id': 'M2',
+      'text': '',
+      'ts': 1,
+      'from_me': false,
+      'sender': '1@s.whatsapp.net',
+      'thumb': '!!!not-base64!!!',
+    });
+    expect(invalid.thumbBytes, isNull);
+
+    final empty = Msg.fromJson({
+      'id': 'M3',
+      'text': '',
+      'ts': 1,
+      'from_me': false,
+      'sender': '1@s.whatsapp.net',
+    });
+    expect(empty.thumbBytes, isNull);
+  });
+
+  test('Snapshot.chat and Snapshot.message lookups prefer active chat', () {
+    final snap = Snapshot.fromJson({
+      'chats': [
+        {'jid': '1@s.whatsapp.net', 'name': 'Active'},
+      ],
+      'archived': [
+        {'jid': '1@s.whatsapp.net', 'name': 'Archived'},
+        {'jid': '2@s.whatsapp.net', 'name': 'Old'},
+      ],
+      'messages': [
+        {
+          'id': 'MSG1',
+          'text': 'first',
+          'ts': 100,
+          'from_me': false,
+          'sender': '1@s.whatsapp.net',
+        },
+        {
+          'id': 'MSG1',
+          'text': 'duplicate',
+          'ts': 200,
+          'from_me': false,
+          'sender': '1@s.whatsapp.net',
+        },
+      ],
+    });
+    expect(snap.chat('1@s.whatsapp.net')?.name, 'Active');
+    expect(snap.chat('2@s.whatsapp.net')?.name, 'Old');
+    expect(snap.chat('missing@s.whatsapp.net'), isNull);
+    expect(snap.chat(null), isNull);
+
+    expect(snap.message('MSG1')?.text, 'first');
+    expect(snap.message('MISSING'), isNull);
+    expect(snap.message(null), isNull);
+  });
+
+  test('Bridge.dispose is idempotent and suppresses post-dispose calls', () {
+    final b = Bridge(18799);
+    b.dispose();
+    b.dispose();
+    b.connect();
+    b.select('1@s.whatsapp.net');
   });
 }

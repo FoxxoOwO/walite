@@ -63,7 +63,7 @@ fn lock() -> parking_lot::MutexGuard<'static, Option<Inner>> {
 
 /// Probe width/height/fps. Falls back to sane defaults when ffprobe is missing.
 fn probe(path: &Path) -> ((u32, u32), f32) {
-    let output = Command::new(crate::audio::ffprobe_bin())
+    let output = crate::audio::hidden_command(crate::audio::ffprobe_bin())
         .args([
             "-v",
             "error",
@@ -102,7 +102,7 @@ fn probe(path: &Path) -> ((u32, u32), f32) {
 /// Total media length via ffprobe. One subprocess, cached for the clip's lifetime.
 fn probe_duration(path: &Path) -> Option<Duration> {
     let ffprobe = crate::audio::ffprobe_bin();
-    let out = Command::new(ffprobe)
+    let out = crate::audio::hidden_command(ffprobe)
         .args([
             "-v",
             "error",
@@ -171,7 +171,7 @@ fn temp_audio_path(src: &Path) -> PathBuf {
 /// Extract the audio track to WAV. Runs off the UI thread; silence is fine.
 fn extract_audio(src: &Path, stop: Arc<AtomicBool>) -> Option<PathBuf> {
     let out = temp_audio_path(src);
-    let status = Command::new(crate::audio::ffmpeg_bin())
+    let status = crate::audio::hidden_command(crate::audio::ffmpeg_bin())
         .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
         .arg(src)
         .args(["-vn", "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le"])
@@ -195,7 +195,7 @@ fn spawn_decoder(inner: &mut Inner, start: f32) -> Result<(), String> {
     }
 
     let path = inner.path.clone().ok_or_else(|| "no media path".to_string())?;
-    let mut cmd = Command::new(crate::audio::ffmpeg_bin());
+    let mut cmd = crate::audio::hidden_command(crate::audio::ffmpeg_bin());
     cmd.args(["-v", "error", "-nostdin"]);
     if start > 0.0 {
         // `-ss` before `-i` seeks on the demuxer, which is fast and keyframe-accurate enough here.

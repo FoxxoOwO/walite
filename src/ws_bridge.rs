@@ -8,14 +8,16 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use parking_lot::{Mutex, RwLock};
+use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::Notify;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use whatsapp_rust::wacore_binary::Jid;
 
@@ -44,10 +46,24 @@ static AVATAR_CACHE: LazyLock<Mutex<(u64, HashMap<String, Option<String>>)>> =
     LazyLock::new(|| Mutex::new((0, HashMap::new())));
 
 /// Cached sticker list keyed by `media::MEDIA_REV`.
-static STICKER_CACHE: Mutex<(u64, Vec<String>)> = Mutex::new((0, Vec::new()));
+/// Uses `Option<u64>` so an empty sticker folder is also cached instead of
+/// rescanning `media_dir` on every snapshot.
+static STICKER_CACHE: Mutex<(Option<u64>, Vec<String>)> = Mutex::new((None, Vec::new()));
+
+/// Short-lived cache for `Path::is_file()` checks in 200 ms snapshots.
+const MEDIA_EXISTS_TTL: Duration = Duration::from_secs(5);
+static MEDIA_EXISTS_CACHE: LazyLock<Mutex<(u64, Instant, HashMap<String, bool>)>> =
+    LazyLock::new(|| Mutex::new((0, Instant::now(), HashMap::new())));
+
+/// Cached base64 encodings of message thumbnails keyed by message ID.
+static THUMB_B64_CACHE: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn sync_connection_status(backend: &BackendHandle) {
     let status = backend.connection_status();
+    if backend.state.read().connection == status {
+        return;
+    }
     let mut s = backend.state.write();
     if s.connection != status {
         s.connection = status;
@@ -76,15 +92,26 @@ pub async fn run(port: u16) -> Result<()> {
     tracing::info!("WS bridge listening on 127.0.0.1:{bound}");
 
     let clients: Clients = Arc::new(Mutex::new(HashMap::new()));
+    let snap_notify = Arc::new(Notify::new());
 
     {
         let clients = clients.clone();
         let state = state.clone();
         let backend = backend.clone();
+        let snap_notify = snap_notify.clone();
         tokio::spawn(async move {
             let mut last = String::new();
             loop {
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+                    _ = snap_notify.notified() => {
+                        // Brief coalesce window so a burst of commands emits one snapshot.
+                        tokio::time::sleep(Duration::from_millis(16)).await;
+                    }
+                }
+                if clients.lock().is_empty() {
+                    continue;
+                }
                 sync_connection_status(&backend);
                 let snap = snapshot(&state);
                 if snap == last {
@@ -100,6 +127,7 @@ pub async fn run(port: u16) -> Result<()> {
     {
         let clients = clients.clone();
         let backend = backend.clone();
+        let snap_notify = snap_notify.clone();
         let mut rx = crate::notifications::subscribe_activations();
         tokio::spawn(async move {
             while let Ok(chat_opt) = rx.recv().await {
@@ -108,12 +136,16 @@ pub async fn run(port: u16) -> Result<()> {
                         {
                             let mut s = backend.state.write();
                             let canon = s.canonical_jid(&jid);
+                            if s.selected_chat.as_ref() != Some(&canon) {
+                                MESSAGE_LIMIT.store(MESSAGE_WINDOW, Ordering::Relaxed);
+                            }
                             s.selected_chat = Some(canon.clone());
                             if let Some(c) = s.chats.get_mut(&canon) {
                                 c.unread_count = 0;
                             }
                         }
                         let _ = backend.send_command(Command::select_chat(Some(jid)));
+                        snap_notify.notify_one();
                     }
                 }
                 let payload = json!({
@@ -136,11 +168,18 @@ pub async fn run(port: u16) -> Result<()> {
             id,
             clients.clone(),
             backend.clone(),
+            snap_notify.clone(),
         ));
     }
 }
 
-async fn handle_conn(stream: TcpStream, id: usize, clients: Clients, backend: Arc<BackendHandle>) {
+async fn handle_conn(
+    stream: TcpStream,
+    id: usize,
+    clients: Clients,
+    backend: Arc<BackendHandle>,
+    snap_notify: Arc<Notify>,
+) {
     let ws = match tokio_tungstenite::accept_async(stream).await {
         Ok(ws) => ws,
         Err(err) => {
@@ -167,7 +206,9 @@ async fn handle_conn(stream: TcpStream, id: usize, clients: Clients, backend: Ar
                 None => break,
             },
             incoming = inbox.next() => match incoming {
-                Some(Ok(WsMessage::Text(text))) => handle_command(text.as_str(), &backend, &out_tx),
+                Some(Ok(WsMessage::Text(text))) => {
+                    handle_command(text.as_str(), &backend, &out_tx, &snap_notify);
+                }
                 Some(Ok(WsMessage::Close(_))) | None => break,
                 Some(Ok(_)) => {}
                 Some(Err(err)) => {
@@ -188,10 +229,16 @@ async fn handle_conn(stream: TcpStream, id: usize, clients: Clients, backend: Ar
     tracing::info!("bridge client {id} left");
 }
 
-fn handle_command(raw: &str, backend: &BackendHandle, reply_tx: &UnboundedSender<String>) {
+fn handle_command(
+    raw: &str,
+    backend: &Arc<BackendHandle>,
+    reply_tx: &UnboundedSender<String>,
+    snap_notify: &Arc<Notify>,
+) {
     let Ok(value) = serde_json::from_str::<Value>(raw) else {
         return;
     };
+    let mut notify_snap = true;
     match value["type"].as_str() {
         Some("window_focus") => {
             let focused = value["focused"].as_bool().unwrap_or(false);
@@ -227,20 +274,26 @@ fn handle_command(raw: &str, backend: &BackendHandle, reply_tx: &UnboundedSender
                 if let Some(chat) = s.chats.get_mut(&canon) {
                     chat.unread_count = 0;
                 }
+            } else {
+                backend.state.write().selected_chat = None;
             }
             let _ = backend.send_command(Command::select_chat(jid));
         }
         Some("start_chat") => {
             if let Some(raw_phone) = value["phone"].as_str() {
                 if let Some(target_jid) = crate::util::parse_jid(raw_phone) {
-                    let name = crate::util::format_jid(&target_jid);
-                    {
+                    MESSAGE_LIMIT.store(MESSAGE_WINDOW, Ordering::Relaxed);
+                    let selected_jid = {
                         let mut s = backend.state.write();
-                        let _ = s.get_or_create_chat(target_jid.clone(), name, false);
-                        s.selected_chat = Some(target_jid.clone());
-                    }
+                        let canon = s.canonical_jid(&target_jid);
+                        let name = crate::util::format_jid(&canon);
+                        let _ = s.get_or_create_chat(canon.clone(), name, false);
+                        s.selected_chat = Some(canon.clone());
+                        s.dirty = true;
+                        canon
+                    };
                     let _ = backend.send_command(Command::SelectChat {
-                        chat_jid: Some(target_jid),
+                        chat_jid: Some(selected_jid),
                     });
                 }
             }
@@ -363,72 +416,131 @@ fn handle_command(raw: &str, backend: &BackendHandle, reply_tx: &UnboundedSender
             }
         }
         Some("paste_clipboard_image") => {
-            let reply = match crate::clipboard::save_clipboard_image() {
-                Ok(Some(path)) => json!({
-                    "type": "clipboard_image",
-                    "path": path.to_string_lossy(),
-                }),
-                Ok(None) => json!({
-                    "type": "clipboard_image",
-                    "path": null,
-                }),
-                Err(err) => json!({
-                    "type": "clipboard_image",
-                    "path": null,
-                    "error": err,
-                }),
-            };
-            let _ = reply_tx.send(reply.to_string());
+            notify_snap = false;
+            let reply_tx = reply_tx.clone();
+            tokio::spawn(async move {
+                let res =
+                    tokio::task::spawn_blocking(crate::clipboard::save_clipboard_image).await;
+                let reply = match res {
+                    Ok(Ok(Some(path))) => json!({
+                        "type": "clipboard_image",
+                        "path": path.to_string_lossy(),
+                    }),
+                    Ok(Ok(None)) => json!({
+                        "type": "clipboard_image",
+                        "path": null,
+                    }),
+                    Ok(Err(err)) => json!({
+                        "type": "clipboard_image",
+                        "path": null,
+                        "error": err,
+                    }),
+                    Err(err) => json!({
+                        "type": "clipboard_image",
+                        "path": null,
+                        "error": err.to_string(),
+                    }),
+                };
+                let _ = reply_tx.send(reply.to_string());
+            });
         }
         // Voice notes: the bridge runs on the same machine as the GUI, so the
         // desktop recorder captures from the same microphone and encodes OGG/Opus.
         Some("record_start") => {
-            if let Err(err) = crate::recorder::start() {
-                tracing::warn!("bridge could not start recording: {err}");
-            }
+            notify_snap = false;
+            tokio::task::spawn_blocking(|| {
+                if let Err(err) = crate::recorder::start() {
+                    tracing::warn!("bridge could not start recording: {err}");
+                }
+            });
         }
         Some("record_stop") => {
+            notify_snap = false;
             if let Some(chat) = jid_field(&value, "chat") {
-                match crate::recorder::finish() {
-                    Ok(rec) => {
-                        let _ = backend.send_command(Command::SendVoiceNote {
-                            chat_jid: chat,
-                            file_path: rec.path,
-                            duration_seconds: (rec.duration_ms / 1000).max(1) as u32,
-                            waveform: rec.waveform,
-                        });
+                let backend = backend.clone();
+                tokio::spawn(async move {
+                    match tokio::task::spawn_blocking(crate::recorder::finish).await {
+                        Ok(Ok(rec)) => {
+                            let _ = backend.send_command(Command::SendVoiceNote {
+                                chat_jid: chat,
+                                file_path: rec.path,
+                                duration_seconds: (rec.duration_ms / 1000).max(1) as u32,
+                                waveform: rec.waveform,
+                            });
+                        }
+                        Ok(Err(err)) => tracing::warn!("bridge could not finish recording: {err}"),
+                        Err(err) => tracing::warn!("bridge record task panicked: {err}"),
                     }
-                    Err(err) => tracing::warn!("bridge could not finish recording: {err}"),
-                }
+                });
             }
         }
-        Some("record_cancel") => crate::recorder::cancel(),
+        Some("record_cancel") => {
+            notify_snap = false;
+            tokio::task::spawn_blocking(crate::recorder::cancel);
+        }
         Some("audio_toggle") => {
-            if let (Some(id), Some(path)) = (id_field(&value), value["path"].as_str()) {
-                if let Err(err) = crate::audio::toggle(&id, Path::new(path)) {
-                    tracing::warn!("bridge audio toggle failed: {err}");
-                }
+            notify_snap = false;
+            if let (Some(id), Some(path)) = (
+                id_field(&value),
+                value["path"].as_str().map(str::to_string),
+            ) {
+                let snap_notify = snap_notify.clone();
+                tokio::spawn(async move {
+                    let res = tokio::task::spawn_blocking(move || {
+                        crate::audio::toggle(&id, Path::new(&path))
+                    })
+                    .await;
+                    if let Ok(Err(err)) = res {
+                        tracing::warn!("bridge audio toggle failed: {err}");
+                    }
+                    snap_notify.notify_one();
+                });
             }
         }
-        Some("audio_pause") => crate::audio::pause(),
-        Some("audio_resume") => crate::audio::resume(),
+        Some("audio_pause") => {
+            notify_snap = false;
+            let snap_notify = snap_notify.clone();
+            tokio::spawn(async move {
+                let _ = tokio::task::spawn_blocking(crate::audio::pause).await;
+                snap_notify.notify_one();
+            });
+        }
+        Some("audio_resume") => {
+            notify_snap = false;
+            let snap_notify = snap_notify.clone();
+            tokio::spawn(async move {
+                let _ = tokio::task::spawn_blocking(crate::audio::resume).await;
+                snap_notify.notify_one();
+            });
+        }
         Some("audio_seek") => {
+            notify_snap = false;
             if let Some(ms) = value["ms"].as_u64() {
-                crate::audio::seek(Duration::from_millis(ms));
+                let snap_notify = snap_notify.clone();
+                tokio::spawn(async move {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        crate::audio::seek(Duration::from_millis(ms))
+                    })
+                    .await;
+                    snap_notify.notify_one();
+                });
             }
         }
         Some("open_file") => {
-            if let Some(path) = value["path"].as_str() {
-                crate::media::open_file(Path::new(path));
+            notify_snap = false;
+            if let Some(path) = value["path"].as_str().map(str::to_string) {
+                tokio::task::spawn_blocking(move || crate::media::open_file(Path::new(&path)));
             }
         }
         Some("show_in_folder") => {
-            if let Some(path) = value["path"].as_str() {
-                crate::media::show_in_folder(Path::new(path));
+            notify_snap = false;
+            if let Some(path) = value["path"].as_str().map(str::to_string) {
+                tokio::task::spawn_blocking(move || crate::media::show_in_folder(Path::new(&path)));
             }
         }
         Some("open_media_dir") => {
-            crate::media::open_file(&crate::media::media_dir());
+            notify_snap = false;
+            tokio::task::spawn_blocking(|| crate::media::open_file(&crate::media::media_dir()));
         }
         Some("more") => {
             let step = value["count"].as_u64().unwrap_or(MESSAGE_WINDOW as u64) as usize;
@@ -569,6 +681,7 @@ fn handle_command(raw: &str, backend: &BackendHandle, reply_tx: &UnboundedSender
                 })
             };
             let _ = reply_tx.send(reply.to_string());
+            notify_snap = false;
         }
         Some("view_once") => {
             if let (Some(jid), Some(id)) = (jid_field(&value, "chat"), id_field(&value)) {
@@ -630,6 +743,7 @@ fn handle_command(raw: &str, backend: &BackendHandle, reply_tx: &UnboundedSender
             }
         }
         Some("export_chat") => {
+            notify_snap = false;
             if let Some(jid) = jid_field(&value, "chat") {
                 let format = match value["format"].as_str() {
                     Some("json") => crate::export::ExportFormat::Json,
@@ -647,25 +761,44 @@ fn handle_command(raw: &str, backend: &BackendHandle, reply_tx: &UnboundedSender
                     (chat, msgs, contacts, self_name)
                 };
                 if let Some(chat) = chat_opt {
-                    let reply = match crate::export::save_export(
-                        &chat,
-                        &msgs,
-                        &contacts,
-                        &self_name,
-                        format,
-                        custom_dir.as_deref(),
-                    ) {
-                        Ok(path) => json!({
-                            "type": "export_result",
-                            "ok": true,
-                            "path": path.to_string_lossy(),
-                        }),
-                        Err(err) => json!({
-                            "type": "export_result",
-                            "ok": false,
-                            "error": err.to_string(),
-                        }),
-                    };
+                    let reply_tx = reply_tx.clone();
+                    tokio::spawn(async move {
+                        let res = tokio::task::spawn_blocking(move || {
+                            crate::export::save_export(
+                                &chat,
+                                &msgs,
+                                &contacts,
+                                &self_name,
+                                format,
+                                custom_dir.as_deref(),
+                            )
+                        })
+                        .await;
+                        let reply = match res {
+                            Ok(Ok(path)) => json!({
+                                "type": "export_result",
+                                "ok": true,
+                                "path": path.to_string_lossy(),
+                            }),
+                            Ok(Err(err)) => json!({
+                                "type": "export_result",
+                                "ok": false,
+                                "error": err.to_string(),
+                            }),
+                            Err(err) => json!({
+                                "type": "export_result",
+                                "ok": false,
+                                "error": err.to_string(),
+                            }),
+                        };
+                        let _ = reply_tx.send(reply.to_string());
+                    });
+                } else {
+                    let reply = json!({
+                        "type": "export_result",
+                        "ok": false,
+                        "error": "Chat nenalezen",
+                    });
                     let _ = reply_tx.send(reply.to_string());
                 }
             }
@@ -960,6 +1093,7 @@ fn handle_command(raw: &str, backend: &BackendHandle, reply_tx: &UnboundedSender
                 })
                 .to_string(),
             );
+            notify_snap = false;
         }
         Some("get_chat_gallery") => {
             let reply = {
@@ -982,6 +1116,7 @@ fn handle_command(raw: &str, backend: &BackendHandle, reply_tx: &UnboundedSender
                 }
             };
             let _ = reply_tx.send(reply.to_string());
+            notify_snap = false;
         }
         Some("sync_full_history") => {
             let chat_jid = jid_field(&value, "chat");
@@ -1056,53 +1191,80 @@ fn handle_command(raw: &str, backend: &BackendHandle, reply_tx: &UnboundedSender
             let _ = reply_tx.send(reply.to_string());
         }
         Some("test_notification") => {
-            let _ = crate::notifications::show_toast(
-                "WaLite",
-                "Takto vypadá oznámení o nové zprávě.",
-            );
-            crate::notifications::play_sound();
+            notify_snap = false;
+            tokio::task::spawn_blocking(|| {
+                let _ = crate::notifications::show_toast(
+                    "WaLite",
+                    "Takto vypadá oznámení o nové zprávě.",
+                );
+                crate::notifications::play_sound();
+            });
         }
         Some("preview_sound") => {
-            let preset = value["preset"].as_str();
-            let path = value["path"].as_str();
-            crate::notifications::play_sound_preview(preset, path);
+            notify_snap = false;
+            let preset = value["preset"].as_str().map(str::to_string);
+            let path = value["path"].as_str().map(str::to_string);
+            tokio::task::spawn_blocking(move || {
+                crate::notifications::play_sound_preview(preset.as_deref(), path.as_deref());
+            });
         }
         Some("media_stats") => {
-            let reply = compute_media_stats_json(&backend.state, None);
-            let _ = reply_tx.send(reply.to_string());
+            notify_snap = false;
+            let state = backend.state.clone();
+            let reply_tx = reply_tx.clone();
+            tokio::spawn(async move {
+                if let Ok(reply) = tokio::task::spawn_blocking(move || {
+                    compute_media_stats_json(&state, None).to_string()
+                })
+                .await
+                {
+                    let _ = reply_tx.send(reply);
+                }
+            });
         }
         Some("clean_media") => {
-            let mode = value["mode"].as_str().unwrap_or("stale");
-            let stats = {
-                let s = backend.state.read();
-                let referenced = s.referenced_media_paths();
-                crate::media::media_stats(
-                    &crate::media::media_dir(),
-                    &referenced,
-                    Duration::from_secs(30 * 24 * 60 * 60),
-                    SystemTime::now(),
-                )
-            };
-            let targets = if mode == "old" {
-                &stats.old_paths
-            } else {
-                &stats.stale_paths
-            };
-            let mut removed = 0usize;
-            let mut freed = 0u64;
-            for path in targets {
-                if let Ok(meta) = std::fs::metadata(path) {
-                    freed += meta.len();
+            notify_snap = false;
+            let mode = value["mode"].as_str().unwrap_or("stale").to_string();
+            let state = backend.state.clone();
+            let reply_tx = reply_tx.clone();
+            let snap_notify = snap_notify.clone();
+            tokio::spawn(async move {
+                let res = tokio::task::spawn_blocking(move || {
+                    let stats = {
+                        let s = state.read();
+                        let referenced = s.referenced_media_paths();
+                        crate::media::media_stats(
+                            &crate::media::media_dir(),
+                            &referenced,
+                            Duration::from_secs(30 * 24 * 60 * 60),
+                            SystemTime::now(),
+                        )
+                    };
+                    let targets = if mode == "old" {
+                        &stats.old_paths
+                    } else {
+                        &stats.stale_paths
+                    };
+                    let mut removed = 0usize;
+                    let mut freed = 0u64;
+                    for path in targets {
+                        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                        if std::fs::remove_file(path).is_ok() {
+                            removed += 1;
+                            freed += size;
+                        }
+                    }
+                    if removed > 0 {
+                        crate::media::MEDIA_REV.fetch_add(1, Ordering::Relaxed);
+                        snap_notify.notify_one();
+                    }
+                    compute_media_stats_json(&state, Some((removed, freed))).to_string()
+                })
+                .await;
+                if let Ok(reply) = res {
+                    let _ = reply_tx.send(reply);
                 }
-                if std::fs::remove_file(path).is_ok() {
-                    removed += 1;
-                }
-            }
-            if removed > 0 {
-                crate::media::MEDIA_REV.fetch_add(1, Ordering::Relaxed);
-            }
-            let reply = compute_media_stats_json(&backend.state, Some((removed, freed)));
-            let _ = reply_tx.send(reply.to_string());
+            });
         }
         Some("check_updates") => {
             crate::updater::spawn_check(backend.state.clone());
@@ -1277,7 +1439,12 @@ fn handle_command(raw: &str, backend: &BackendHandle, reply_tx: &UnboundedSender
             let query = value["q"].as_str().unwrap_or_default().to_string();
             let _ = backend.send_command(Command::search(query));
         }
-        _ => {}
+        _ => {
+            notify_snap = false;
+        }
+    }
+    if notify_snap {
+        snap_notify.notify_one();
     }
 }
 
@@ -1292,7 +1459,7 @@ fn compute_chat_gallery_json(s: &crate::state::AppState, chat_jid: &Jid) -> Valu
         let media_path = m
             .media_path
             .as_ref()
-            .filter(|p| Path::new(p).is_file())
+            .filter(|p| media_file_exists_cached(p))
             .cloned();
         let thumb = if !m.view_once
             && (media_path.is_none()
@@ -1301,7 +1468,7 @@ fn compute_chat_gallery_json(s: &crate::state::AppState, chat_jid: &Jid) -> Valu
             m.media_jpeg_thumbnail
                 .as_deref()
                 .filter(|b| !b.is_empty() && b.len() <= 32 * 1024)
-                .map(encode_base64)
+                .map(|b| thumb_base64_cached(&m.id, b))
         } else {
             None
         };
@@ -1414,31 +1581,56 @@ fn assign_bool(slot: &mut bool, value: &Value) -> bool {
     }
 }
 
-fn prefs_json(s: &crate::state::AppState) -> Value {
+#[derive(Serialize)]
+struct PrefsJson<'a> {
+    enter_is_send: bool,
+    sound_notifications: bool,
+    show_previews: bool,
+    desktop_notifications: bool,
+    auto_download_photos: bool,
+    auto_download_videos: bool,
+    auto_download_docs: bool,
+    font_size: f32,
+    auto_scroll_to_bottom: bool,
+    dark_theme_preset: usize,
+    language: &'static str,
+    check_updates: bool,
+    auto_install_updates: bool,
+    run_in_tray: bool,
+    close_to_tray: bool,
+    start_with_windows: bool,
+    chat_wallpaper_color: Option<&'a str>,
+    chat_wallpaper_path: Option<&'a str>,
+    chat_wallpaper_doodles: bool,
+    notification_sound: Option<&'a str>,
+    custom_sound_path: Option<&'a str>,
+}
+
+fn prefs_json<'a>(s: &'a crate::state::AppState) -> PrefsJson<'a> {
     let p = &s.preferences;
-    json!({
-        "enter_is_send": p.enter_is_send,
-        "sound_notifications": p.sound_notifications,
-        "show_previews": p.show_previews,
-        "desktop_notifications": p.desktop_notifications,
-        "auto_download_photos": p.auto_download_photos,
-        "auto_download_videos": p.auto_download_videos,
-        "auto_download_docs": p.auto_download_docs,
-        "font_size": p.font_size,
-        "auto_scroll_to_bottom": s.auto_scroll_to_bottom,
-        "dark_theme_preset": p.dark_theme_preset,
-        "language": p.language.code(),
-        "check_updates": p.check_updates,
-        "auto_install_updates": p.auto_install_updates,
-        "run_in_tray": p.run_in_tray,
-        "close_to_tray": p.close_to_tray,
-        "start_with_windows": p.start_with_windows,
-        "chat_wallpaper_color": p.chat_wallpaper_color,
-        "chat_wallpaper_path": p.chat_wallpaper_path,
-        "chat_wallpaper_doodles": p.chat_wallpaper_doodles,
-        "notification_sound": p.notification_sound,
-        "custom_sound_path": p.custom_sound_path,
-    })
+    PrefsJson {
+        enter_is_send: p.enter_is_send,
+        sound_notifications: p.sound_notifications,
+        show_previews: p.show_previews,
+        desktop_notifications: p.desktop_notifications,
+        auto_download_photos: p.auto_download_photos,
+        auto_download_videos: p.auto_download_videos,
+        auto_download_docs: p.auto_download_docs,
+        font_size: p.font_size,
+        auto_scroll_to_bottom: s.auto_scroll_to_bottom,
+        dark_theme_preset: p.dark_theme_preset,
+        language: p.language.code(),
+        check_updates: p.check_updates,
+        auto_install_updates: p.auto_install_updates,
+        run_in_tray: p.run_in_tray,
+        close_to_tray: p.close_to_tray,
+        start_with_windows: p.start_with_windows,
+        chat_wallpaper_color: p.chat_wallpaper_color.as_deref(),
+        chat_wallpaper_path: p.chat_wallpaper_path.as_deref(),
+        chat_wallpaper_doodles: p.chat_wallpaper_doodles,
+        notification_sound: p.notification_sound.as_deref(),
+        custom_sound_path: p.custom_sound_path.as_deref(),
+    }
 }
 
 fn avatar_path_cached(jid: &Jid) -> Option<String> {
@@ -1457,17 +1649,47 @@ fn avatar_path_cached(jid: &Jid) -> Option<String> {
     path
 }
 
+fn media_file_exists_cached(path: &str) -> bool {
+    let rev = crate::media::MEDIA_REV.load(Ordering::Relaxed);
+    let mut cache = MEDIA_EXISTS_CACHE.lock();
+    let now = Instant::now();
+    if cache.0 != rev || now.duration_since(cache.1) >= MEDIA_EXISTS_TTL || cache.2.len() > 4096 {
+        cache.0 = rev;
+        cache.1 = now;
+        cache.2.clear();
+    }
+    if let Some(&exists) = cache.2.get(path) {
+        return exists;
+    }
+    let exists = Path::new(path).is_file();
+    cache.2.insert(path.to_string(), exists);
+    exists
+}
+
+fn thumb_base64_cached(id: &str, bytes: &[u8]) -> String {
+    let mut cache = THUMB_B64_CACHE.lock();
+    if let Some(encoded) = cache.get(id) {
+        return encoded.clone();
+    }
+    if cache.len() >= 4096 {
+        cache.clear();
+    }
+    let encoded = encode_base64(bytes);
+    cache.insert(id.to_string(), encoded.clone());
+    encoded
+}
+
 fn sticker_paths_cached() -> Vec<String> {
     let rev = crate::media::MEDIA_REV.load(Ordering::Relaxed);
     let mut cache = STICKER_CACHE.lock();
-    if cache.0 == rev && !cache.1.is_empty() {
+    if cache.0 == Some(rev) {
         return cache.1.clone();
     }
     let list: Vec<String> = crate::media::sticker_files()
         .into_iter()
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
-    cache.0 = rev;
+    cache.0 = Some(rev);
     cache.1 = list.clone();
     list
 }
@@ -1518,37 +1740,271 @@ fn strings_field(value: &Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn message_status_str(status: crate::state::MessageStatus) -> &'static str {
+    match status {
+        crate::state::MessageStatus::Sending => "sending",
+        crate::state::MessageStatus::Sent => "sent",
+        crate::state::MessageStatus::Delivered => "delivered",
+        crate::state::MessageStatus::Read => "read",
+        crate::state::MessageStatus::Failed => "failed",
+    }
+}
+
+fn media_type_str(media: crate::state::MediaType) -> &'static str {
+    match media {
+        crate::state::MediaType::Image => "image",
+        crate::state::MediaType::Video => "video",
+        crate::state::MediaType::Audio => "audio",
+        crate::state::MediaType::Document => "document",
+        crate::state::MediaType::Sticker => "sticker",
+        crate::state::MediaType::Voice => "voice",
+    }
+}
+
+#[derive(Serialize)]
+struct ChatLastJson<'a> {
+    text: &'a str,
+    ts: i64,
+    from_me: bool,
+    status: &'static str,
+    media: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+struct ChatRowJson<'a> {
+    jid: String,
+    name: &'a str,
+    unread: u32,
+    group: bool,
+    pinned: bool,
+    archived: bool,
+    muted: bool,
+    typing: bool,
+    participants_count: usize,
+    avatar: Option<String>,
+    draft: Option<&'a str>,
+    last: Option<ChatLastJson<'a>>,
+}
+
+#[derive(Serialize)]
+struct GroupJson<'a> {
+    subject: &'a str,
+    description: Option<&'a str>,
+    admins: Vec<String>,
+    locked: bool,
+    announcement: bool,
+    invite_link: Option<&'a str>,
+    ephemeral: Option<u32>,
+    participants: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct PinnedJson<'a> {
+    id: &'a str,
+    until: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct ReactionJson<'a> {
+    emoji: &'a str,
+    sender: String,
+}
+
+#[derive(Serialize)]
+struct PollTallyJson {
+    option: String,
+    votes: usize,
+}
+
+#[derive(Serialize)]
+struct PollJson<'a> {
+    question: &'a str,
+    options: &'a [String],
+    selectable: u32,
+    quiz: bool,
+    voters: usize,
+    mine: Vec<String>,
+    tallies: Vec<PollTallyJson>,
+}
+
+#[derive(Serialize)]
+struct MessageJson<'a> {
+    id: &'a str,
+    chat: String,
+    sender: String,
+    text: &'a str,
+    ts: i64,
+    from_me: bool,
+    status: &'static str,
+    media: Option<&'static str>,
+    caption: Option<&'a str>,
+    downloaded: bool,
+    media_path: Option<&'a str>,
+    thumb: Option<String>,
+    file_size: Option<u64>,
+    mimetype: Option<&'a str>,
+    reply_to: Option<&'a str>,
+    edited: bool,
+    starred: bool,
+    gif_playback: bool,
+    contacts: &'a [crate::vcard::ContactCard],
+    view_once: bool,
+    view_once_opened: bool,
+    poll: Option<PollJson<'a>>,
+    reactions: Vec<ReactionJson<'a>>,
+}
+
+#[derive(Serialize)]
+struct PresenceJson {
+    jid: String,
+    online: bool,
+    last_seen: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ScheduledJson<'a> {
+    id: &'a str,
+    chat: String,
+    text: &'a str,
+    at: String,
+    status: String,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ConnectionDetailJson<'a> {
+    Str(&'a str),
+    Pct(u8),
+}
+
+#[derive(Serialize)]
+struct ConnectionJson<'a> {
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<ConnectionDetailJson<'a>>,
+}
+
+#[derive(Serialize)]
+struct CallJson<'a> {
+    id: &'a str,
+    peer_jid: String,
+    peer_name: &'a str,
+    peer_avatar: Option<String>,
+    is_video: bool,
+    is_group: bool,
+    status: &'static str,
+    reason: Option<&'a str>,
+    muted: bool,
+    video_enabled: bool,
+    started_at: i64,
+    connected_at: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct AudioJson {
+    playing_id: String,
+    paused: bool,
+    pos_ms: u64,
+    dur_ms: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct UpdateAvailJson<'a> {
+    version: &'a str,
+    tag: &'a str,
+    page_url: &'a str,
+    notes: &'a str,
+    has_asset: bool,
+}
+
+#[derive(Serialize)]
+struct UpdateJson<'a> {
+    current: &'static str,
+    status: String,
+    busy: bool,
+    available: Option<UpdateAvailJson<'a>>,
+}
+
+#[derive(Serialize)]
+struct ContactJson<'a> {
+    jid: String,
+    name: &'a str,
+    blocked: bool,
+    business: bool,
+    verified_name: Option<&'a str>,
+    avatar: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SnapshotJson<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    #[serde(rename = "self")]
+    self_jid: Option<String>,
+    self_name: Option<&'a str>,
+    self_status: Option<&'a str>,
+    self_avatar: Option<String>,
+    avatar_rev: u64,
+    connection: ConnectionJson<'a>,
+    selected: Option<String>,
+    selected_total_messages: usize,
+    history_syncing: Vec<String>,
+    history_exhausted: Vec<String>,
+    search: &'a str,
+    chats: Vec<ChatRowJson<'a>>,
+    archived: Vec<ChatRowJson<'a>>,
+    group: Option<GroupJson<'a>>,
+    pinned_message: Option<PinnedJson<'a>>,
+    ephemeral: Option<u32>,
+    scheduled: Vec<ScheduledJson<'a>>,
+    presence: Vec<PresenceJson>,
+    prefs: PrefsJson<'a>,
+    messages: Vec<MessageJson<'a>>,
+    call: Option<CallJson<'a>>,
+    audio: Option<AudioJson>,
+    stickers: Vec<String>,
+    update: UpdateJson<'a>,
+    contacts: Vec<ContactJson<'a>>,
+}
+
+fn chat_row<'a>(s: &'a crate::state::AppState, chat: &'a crate::state::Chat) -> ChatRowJson<'a> {
+    let last = chat.last_message.as_ref().map(|m| ChatLastJson {
+        text: &m.text,
+        ts: m.timestamp.timestamp_millis(),
+        from_me: m.from_me,
+        status: message_status_str(m.status),
+        media: m.media_type.map(media_type_str),
+    });
+    let draft = s.drafts.get(&chat.jid).map(String::as_str).filter(|d| !d.is_empty());
+    ChatRowJson {
+        jid: chat.jid.to_string(),
+        name: &chat.name,
+        unread: chat.unread_count,
+        group: chat.is_group,
+        pinned: chat.is_pinned,
+        archived: chat.is_archived,
+        muted: chat.is_muted(),
+        typing: chat.is_currently_typing(),
+        participants_count: chat.participants.len(),
+        avatar: avatar_path_cached(&chat.jid),
+        draft,
+        last,
+    }
+}
+
 fn snapshot(state: &SharedState) -> String {
     let s = state.read();
 
-    let chat_row = |chat: &crate::state::Chat| -> Value {
-        let last = chat.last_message.as_ref().map(|m| {
-            json!({
-                "text": m.text,
-                "ts": m.timestamp.timestamp_millis(),
-                "from_me": m.from_me,
-                "status": format!("{:?}", m.status).to_lowercase(),
-                "media": m.media_type.as_ref().map(|t| format!("{t:?}").to_lowercase()),
-            })
-        });
-        let draft = s.drafts.get(&chat.jid).filter(|d| !d.is_empty());
-        json!({
-            "jid": chat.jid.to_string(),
-            "name": chat.name,
-            "unread": chat.unread_count,
-            "group": chat.is_group,
-            "pinned": chat.is_pinned,
-            "archived": chat.is_archived,
-            "muted": chat.is_muted(),
-            "typing": chat.is_currently_typing(),
-            "participants_count": chat.participants.len(),
-            "avatar": avatar_path_cached(&chat.jid),
-            "draft": draft,
-            "last": last,
-        })
-    };
-    let chats: Vec<Value> = s.filtered_chats().into_iter().map(chat_row).collect();
-    let archived: Vec<Value> = s.archived_chats().into_iter().map(chat_row).collect();
+    let chats: Vec<ChatRowJson<'_>> = s
+        .filtered_chats()
+        .into_iter()
+        .map(|c| chat_row(&s, c))
+        .collect();
+    let archived: Vec<ChatRowJson<'_>> = s
+        .archived_chats()
+        .into_iter()
+        .map(|c| chat_row(&s, c))
+        .collect();
 
     let group = s.selected_chat.as_ref().and_then(|jid| {
         let chat = s.chats.get(jid)?;
@@ -1556,26 +2012,26 @@ fn snapshot(state: &SharedState) -> String {
             return None;
         }
         let info = s.group_info.get(&jid.to_string());
-        Some(json!({
-            "subject": info.map(|i| i.subject.clone()).unwrap_or_else(|| chat.name.clone()),
-            "description": info.and_then(|i| i.description.clone()),
-            "admins": info
+        Some(GroupJson {
+            subject: info.map(|i| i.subject.as_str()).unwrap_or(&chat.name),
+            description: info.and_then(|i| i.description.as_deref()),
+            admins: info
                 .map(|i| i.admins.iter().map(|j| j.to_string()).collect::<Vec<_>>())
                 .unwrap_or_default(),
-            "locked": info.map(|i| i.is_locked).unwrap_or(false),
-            "announcement": info.map(|i| i.is_announcement).unwrap_or(false),
-            "invite_link": info.and_then(|i| i.invite_link.clone()),
-            "ephemeral": s.ephemeral.get(jid).copied(),
-            "participants": chat.participants.iter().map(|j| j.to_string()).collect::<Vec<_>>(),
-        }))
+            locked: info.map(|i| i.is_locked).unwrap_or(false),
+            announcement: info.map(|i| i.is_announcement).unwrap_or(false),
+            invite_link: info.and_then(|i| i.invite_link.as_deref()),
+            ephemeral: s.ephemeral.get(jid).copied(),
+            participants: chat.participants.iter().map(|j| j.to_string()).collect::<Vec<_>>(),
+        })
     });
 
     let pinned_message = s.selected_chat.as_ref().and_then(|jid| {
         let pin = s.pinned.get(jid).filter(|p| !p.expired())?;
-        Some(json!({
-            "id": pin.message_id,
-            "until": pin.until.map(|t| t.timestamp_millis()),
-        }))
+        Some(PinnedJson {
+            id: &pin.message_id,
+            until: pin.until.map(|t| t.timestamp_millis()),
+        })
     });
 
     let ephemeral = s
@@ -1583,22 +2039,24 @@ fn snapshot(state: &SharedState) -> String {
         .as_ref()
         .and_then(|jid| s.ephemeral.get(jid).copied());
 
-    let mut messages: Vec<Value> = Vec::new();
+    let mut messages: Vec<MessageJson<'_>> = Vec::new();
     let me = s.self_jid.as_ref().map(|j| j.to_string()).unwrap_or_default();
     if let Some(selected) = s.selected_chat.as_ref() {
         if let Some(list) = s.get_chat_messages(selected) {
             let window = MESSAGE_LIMIT.load(Ordering::Relaxed);
             for m in list.iter().skip(list.len().saturating_sub(window)) {
-                let reactions: Vec<Value> = m
+                let reactions: Vec<ReactionJson<'_>> = m
                     .reactions
                     .iter()
-                    .map(|r| json!({"emoji": r.emoji, "sender": r.sender.to_string()}))
+                    .map(|r| ReactionJson {
+                        emoji: &r.emoji,
+                        sender: r.sender.to_string(),
+                    })
                     .collect();
                 let media_path = m
                     .media_path
-                    .as_ref()
-                    .filter(|p| Path::new(p).is_file())
-                    .cloned();
+                    .as_deref()
+                    .filter(|p| media_file_exists_cached(p));
                 let thumb = if !m.view_once
                     && (media_path.is_none()
                         || matches!(m.media_type, Some(crate::state::MediaType::Video)))
@@ -1606,65 +2064,63 @@ fn snapshot(state: &SharedState) -> String {
                     m.media_jpeg_thumbnail
                         .as_deref()
                         .filter(|b| !b.is_empty() && b.len() <= 32 * 1024)
-                        .map(encode_base64)
+                        .map(|b| thumb_base64_cached(&m.id, b))
                 } else {
                     None
                 };
-                messages.push(json!({
-                    "id": m.id,
-                    "chat": m.chat_jid.to_string(),
-                    "sender": m.sender_jid.to_string(),
-                    "text": m.text,
-                    "ts": m.timestamp.timestamp_millis(),
-                    "from_me": m.from_me,
-                    "status": format!("{:?}", m.status).to_lowercase(),
-                    "media": m.media_type.as_ref().map(|t| format!("{t:?}").to_lowercase()),
-                    "caption": m.media_caption,
-                    "downloaded": media_path.is_some(),
-                    "media_path": media_path,
-                    "thumb": thumb,
-                    "file_size": m.media_file_length,
-                    "mimetype": m.media_mimetype,
-                    "reply_to": m.reply_to,
-                    "edited": m.edited,
-                    "starred": m.starred,
-                    "gif_playback": m.gif_playback,
-                    "contacts": m.contacts,
-                    "view_once": m.view_once,
-                    "view_once_opened": m.view_once_opened,
-                    "poll": m.poll.as_ref().map(|p| json!({
-                        "question": p.question,
-                        "options": p.options,
-                        "selectable": p.selectable_count,
-                        "quiz": p.is_quiz,
-                        "voters": p.total_voters(),
-                        "mine": p.my_vote(&me),
-                        "tallies": p
+                messages.push(MessageJson {
+                    id: &m.id,
+                    chat: m.chat_jid.to_string(),
+                    sender: m.sender_jid.to_string(),
+                    text: &m.text,
+                    ts: m.timestamp.timestamp_millis(),
+                    from_me: m.from_me,
+                    status: message_status_str(m.status),
+                    media: m.media_type.map(media_type_str),
+                    caption: m.media_caption.as_deref(),
+                    downloaded: media_path.is_some(),
+                    media_path,
+                    thumb,
+                    file_size: m.media_file_length,
+                    mimetype: m.media_mimetype.as_deref(),
+                    reply_to: m.reply_to.as_deref(),
+                    edited: m.edited,
+                    starred: m.starred,
+                    gif_playback: m.gif_playback,
+                    contacts: &m.contacts,
+                    view_once: m.view_once,
+                    view_once_opened: m.view_once_opened,
+                    poll: m.poll.as_ref().map(|p| PollJson {
+                        question: &p.question,
+                        options: &p.options,
+                        selectable: p.selectable_count,
+                        quiz: p.is_quiz,
+                        voters: p.total_voters(),
+                        mine: p.my_vote(&me),
+                        tallies: p
                             .tallies()
                             .into_iter()
-                            .map(|(option, votes)| json!({"option": option, "votes": votes}))
-                            .collect::<Vec<_>>(),
-                    })),
-                    "reactions": reactions,
-                }));
+                            .map(|(option, votes)| PollTallyJson { option, votes })
+                            .collect(),
+                    }),
+                    reactions,
+                });
             }
         }
     }
 
-    let presence: Vec<Value> = s
+    let presence: Vec<PresenceJson> = s
         .contacts
         .values()
         .filter(|c| c.is_online || c.last_seen.is_some())
-        .map(|c| {
-            json!({
-                "jid": c.jid.to_string(),
-                "online": c.is_online,
-                "last_seen": c.last_seen.map(|t| t.to_rfc3339()),
-            })
+        .map(|c| PresenceJson {
+            jid: c.jid.to_string(),
+            online: c.is_online,
+            last_seen: c.last_seen.map(|t| t.to_rfc3339()),
         })
         .collect();
 
-    let scheduled: Vec<Value> = s
+    let scheduled: Vec<ScheduledJson<'_>> = s
         .scheduled_messages
         .iter()
         .filter(|m| {
@@ -1673,25 +2129,44 @@ fn snapshot(state: &SharedState) -> String {
                 ScheduledStatus::Sent | ScheduledStatus::Cancelled
             )
         })
-        .map(|m| {
-            json!({
-                "id": m.id,
-                "chat": m.chat_jid.to_string(),
-                "text": m.text,
-                "at": m.scheduled_for.to_rfc3339(),
-                "status": format!("{:?}", m.status).to_lowercase(),
-            })
+        .map(|m| ScheduledJson {
+            id: &m.id,
+            chat: m.chat_jid.to_string(),
+            text: &m.text,
+            at: m.scheduled_for.to_rfc3339(),
+            status: format!("{:?}", m.status).to_lowercase(),
         })
         .collect();
 
     let connection = match &s.connection {
-        ConnectionStatus::Disconnected => json!({"kind": "disconnected"}),
-        ConnectionStatus::Connecting => json!({"kind": "connecting"}),
-        ConnectionStatus::QrCode(code) => json!({"kind": "qr", "detail": code}),
-        ConnectionStatus::PairCode(code) => json!({"kind": "pair", "detail": code}),
-        ConnectionStatus::Connected => json!({"kind": "connected"}),
-        ConnectionStatus::Syncing(pct) => json!({"kind": "syncing", "detail": pct}),
-        ConnectionStatus::Error(err) => json!({"kind": "error", "detail": err}),
+        ConnectionStatus::Disconnected => ConnectionJson {
+            kind: "disconnected",
+            detail: None,
+        },
+        ConnectionStatus::Connecting => ConnectionJson {
+            kind: "connecting",
+            detail: None,
+        },
+        ConnectionStatus::QrCode(code) => ConnectionJson {
+            kind: "qr",
+            detail: Some(ConnectionDetailJson::Str(code)),
+        },
+        ConnectionStatus::PairCode(code) => ConnectionJson {
+            kind: "pair",
+            detail: Some(ConnectionDetailJson::Str(code)),
+        },
+        ConnectionStatus::Connected => ConnectionJson {
+            kind: "connected",
+            detail: None,
+        },
+        ConnectionStatus::Syncing(pct) => ConnectionJson {
+            kind: "syncing",
+            detail: Some(ConnectionDetailJson::Pct(*pct)),
+        },
+        ConnectionStatus::Error(err) => ConnectionJson {
+            kind: "error",
+            detail: Some(ConnectionDetailJson::Str(err)),
+        },
     };
 
     let call = s.active_call.as_ref().map(|c| {
@@ -1701,44 +2176,42 @@ fn snapshot(state: &SharedState) -> String {
             CallStatus::Connected => ("connected", None),
             CallStatus::Ended(r) => ("ended", Some(r.as_str())),
         };
-        json!({
-            "id": c.call_id,
-            "peer_jid": c.peer_jid.to_string(),
-            "peer_name": c.peer_name,
-            "peer_avatar": avatar_path_cached(&c.peer_jid),
-            "is_video": c.is_video,
-            "is_group": c.is_group,
-            "status": status,
-            "reason": reason,
-            "muted": c.is_muted,
-            "video_enabled": c.is_video_enabled,
-            "started_at": c.started_at.timestamp_millis(),
-            "connected_at": c.connected_at.map(|t| t.timestamp_millis()),
-        })
+        CallJson {
+            id: &c.call_id,
+            peer_jid: c.peer_jid.to_string(),
+            peer_name: &c.peer_name,
+            peer_avatar: avatar_path_cached(&c.peer_jid),
+            is_video: c.is_video,
+            is_group: c.is_group,
+            status,
+            reason,
+            muted: c.is_muted,
+            video_enabled: c.is_video_enabled,
+            started_at: c.started_at.timestamp_millis(),
+            connected_at: c.connected_at.map(|t| t.timestamp_millis()),
+        }
     });
 
     let playing_id = crate::audio::playing_id();
-    let audio = playing_id.map(|id| {
-        json!({
-            "playing_id": id,
-            "paused": crate::audio::is_paused(),
-            "pos_ms": crate::audio::position().as_millis() as u64,
-            "dur_ms": crate::audio::duration().map(|d| d.as_millis() as u64),
-        })
+    let audio = playing_id.map(|id| AudioJson {
+        playing_id: id,
+        paused: crate::audio::is_paused(),
+        pos_ms: crate::audio::position().as_millis() as u64,
+        dur_ms: crate::audio::duration().map(|d| d.as_millis() as u64),
     });
 
-    let update = json!({
-        "current": crate::updater::CURRENT_VERSION,
-        "status": s.update_status.label(),
-        "busy": s.update_status.is_busy(),
-        "available": s.update_available.as_ref().map(|u| json!({
-            "version": u.version,
-            "tag": u.tag,
-            "page_url": u.page_url,
-            "notes": u.notes,
-            "has_asset": u.has_asset(),
-        })),
-    });
+    let update = UpdateJson {
+        current: crate::updater::CURRENT_VERSION,
+        status: s.update_status.label(),
+        busy: s.update_status.is_busy(),
+        available: s.update_available.as_ref().map(|u| UpdateAvailJson {
+            version: &u.version,
+            tag: &u.tag,
+            page_url: &u.page_url,
+            notes: &u.notes,
+            has_asset: u.has_asset(),
+        }),
+    };
 
     let selected_total_messages = s
         .selected_chat
@@ -1746,57 +2219,67 @@ fn snapshot(state: &SharedState) -> String {
         .and_then(|j| s.get_chat_messages(j))
         .map_or(0, |m| m.len());
 
-    json!({
-        "type": "snapshot",
-        "self": s.self_jid.as_ref().map(|j| j.to_string()),
-        "self_name": s.self_name,
-        "self_status": s.self_status,
-        "self_avatar": s.self_jid.as_ref().and_then(|j| avatar_path_cached(&j.to_non_ad())),
-        "avatar_rev": crate::avatars::revision(),
-        "connection": connection,
-        "selected": s.selected_chat.as_ref().map(|j| j.to_string()),
-        "selected_total_messages": selected_total_messages,
-        "history_syncing": s.history_syncing_chats.iter().map(|j| j.to_string()).collect::<Vec<_>>(),
-        "history_exhausted": s.history_exhausted_chats.iter().map(|j| j.to_string()).collect::<Vec<_>>(),
-        "search": s.search_query,
-        "chats": chats,
-        "archived": archived,
-        "group": group,
-        "pinned_message": pinned_message,
-        "ephemeral": ephemeral,
-        "scheduled": scheduled,
-        "presence": presence,
-        "prefs": prefs_json(&s),
-        "messages": messages,
-        "call": call,
-        "audio": audio,
-        "stickers": sticker_paths_cached(),
-        "update": update,
-        "contacts": s
-            .contacts
-            .values()
-            .filter_map(|c| {
-                let name = c
-                    .name
-                    .clone()
-                    .or_else(|| c.push_name.clone())
-                    .or_else(|| c.verified_name.clone())
-                    .unwrap_or_default();
-                if name.is_empty() && !c.is_blocked {
-                    return None;
-                }
-                Some(json!({
-                    "jid": c.jid.to_string(),
-                    "name": name,
-                    "blocked": c.is_blocked,
-                    "business": c.is_business,
-                    "verified_name": c.verified_name,
-                    "avatar": avatar_path_cached(&c.jid.to_non_ad()),
-                }))
+    let contacts: Vec<ContactJson<'_>> = s
+        .contacts
+        .values()
+        .filter_map(|c| {
+            let name = c
+                .name
+                .as_deref()
+                .or(c.push_name.as_deref())
+                .or(c.verified_name.as_deref())
+                .unwrap_or("");
+            if name.is_empty() && !c.is_blocked {
+                return None;
+            }
+            Some(ContactJson {
+                jid: c.jid.to_string(),
+                name,
+                blocked: c.is_blocked,
+                business: c.is_business,
+                verified_name: c.verified_name.as_deref(),
+                avatar: avatar_path_cached(&c.jid.to_non_ad()),
             })
-            .collect::<Vec<Value>>(),
-    })
-    .to_string()
+        })
+        .collect();
+
+    let snap = SnapshotJson {
+        kind: "snapshot",
+        self_jid: s.self_jid.as_ref().map(|j| j.to_string()),
+        self_name: s.self_name.as_deref(),
+        self_status: s.self_status.as_deref(),
+        self_avatar: s.self_jid.as_ref().and_then(|j| avatar_path_cached(&j.to_non_ad())),
+        avatar_rev: crate::avatars::revision(),
+        connection,
+        selected: s.selected_chat.as_ref().map(|j| j.to_string()),
+        selected_total_messages,
+        history_syncing: s
+            .history_syncing_chats
+            .iter()
+            .map(|j| j.to_string())
+            .collect(),
+        history_exhausted: s
+            .history_exhausted_chats
+            .iter()
+            .map(|j| j.to_string())
+            .collect(),
+        search: &s.search_query,
+        chats,
+        archived,
+        group,
+        pinned_message,
+        ephemeral,
+        scheduled,
+        presence,
+        prefs: prefs_json(&s),
+        messages,
+        call,
+        audio,
+        stickers: sticker_paths_cached(),
+        update,
+        contacts,
+    };
+    serde_json::to_string(&snap).unwrap_or_else(|_| "{}".to_string())
 }
 
 #[cfg(test)]
@@ -1946,5 +2429,63 @@ mod tests {
         assert_eq!(snap["messages"].as_array().unwrap().len(), 200);
         assert_eq!(snap["self_status"], "V práci (Dunder Mifflin)");
         assert!(snap["avatar_rev"].as_u64().unwrap() >= 1);
+    }
+
+    #[test]
+    fn select_none_clears_selected_chat_and_start_chat_canonicalizes_dirty() {
+        let mut s = AppState::default();
+        let lid: Jid = "999888777@lid".parse().unwrap();
+        let pn: Jid = "420555111222@s.whatsapp.net".parse().unwrap();
+        s.lid_to_pn.insert(lid.clone(), pn.clone());
+        s.selected_chat = Some(pn.clone());
+        s.dirty = false;
+
+        let shared: SharedState = Arc::new(RwLock::new(s));
+        let (tx_command, mut rx_command) = tokio::sync::mpsc::unbounded_channel();
+        let (_tx_status, rx_status) = tokio::sync::watch::channel(ConnectionStatus::Disconnected);
+        let backend = Arc::new(BackendHandle {
+            tx_command,
+            rx_status,
+            state: shared.clone(),
+            bot_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        });
+        let (reply_tx, _reply_rx) = tokio::sync::mpsc::unbounded_channel();
+        let snap_notify = Arc::new(Notify::new());
+
+        handle_command(
+            r#"{"type":"select","chat":null}"#,
+            &backend,
+            &reply_tx,
+            &snap_notify,
+        );
+        assert!(shared.read().selected_chat.is_none());
+        assert!(matches!(
+            rx_command.try_recv(),
+            Ok(Command::SelectChat { chat_jid: None })
+        ));
+
+        handle_command(
+            r#"{"type":"start_chat","phone":"999888777@lid"}"#,
+            &backend,
+            &reply_tx,
+            &snap_notify,
+        );
+        {
+            let guard = shared.read();
+            assert_eq!(guard.selected_chat.as_ref(), Some(&pn));
+            assert!(guard.chats.contains_key(&pn));
+            assert!(guard.dirty);
+        }
+        assert!(matches!(
+            rx_command.try_recv(),
+            Ok(Command::SelectChat { chat_jid: Some(j) }) if j == pn
+        ));
+    }
+
+    #[test]
+    fn sticker_paths_cached_records_revision_even_when_empty() {
+        let rev = crate::media::MEDIA_REV.load(Ordering::Relaxed);
+        let _ = sticker_paths_cached();
+        assert_eq!(STICKER_CACHE.lock().0, Some(rev));
     }
 }

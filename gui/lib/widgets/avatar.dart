@@ -33,18 +33,16 @@ class WaAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final file = avatarPath != null && avatarPath!.isNotEmpty
-        ? File(avatarPath!)
-        : null;
-    final hasFile = file != null && file.existsSync();
+    final hasPath = avatarPath != null && avatarPath!.isNotEmpty;
 
     Widget circle;
-    if (hasFile) {
+    if (hasPath) {
       circle = ClipOval(
         child: Image.file(
-          file,
+          File(avatarPath!),
           width: radius * 2,
           height: radius * 2,
+          cacheWidth: (radius * 4).round(),
           fit: BoxFit.cover,
           errorBuilder: (_, _, _) => _fallback(),
         ),

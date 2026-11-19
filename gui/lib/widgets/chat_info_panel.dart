@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:material_ui/material_ui.dart';
@@ -20,10 +19,11 @@ String _ephemeralLabel(int seconds, Tr tr) => switch (seconds) {
       _ => tr.t('90 dní', '90 days'),
     };
 
+final _linkRegex = RegExp(r'https?://[^\s<>"\)\]\},;]+');
+
 List<String> extractLinks(String text) {
   final out = <String>[];
-  final regex = RegExp(r'https?://[^\s<>"\)\]\},;]+');
-  for (final m in regex.allMatches(text)) {
+  for (final m in _linkRegex.allMatches(text)) {
     var url = m.group(0)!;
     while (url.isNotEmpty && '.!?:'.contains(url[url.length - 1])) {
       url = url.substring(0, url.length - 1);
@@ -532,7 +532,7 @@ class _ChatInfoPanelState extends State<ChatInfoPanel> {
             itemCount: participants.length,
             itemBuilder: (_, idx) {
               final jid = participants[idx];
-              final isMe = jid == s.self;
+              final isMe = sameJidUser(jid, s.self);
               final isMemberAdmin = group.isAdmin(jid);
               final name = isMe
                   ? tr.t('Vy', 'You')
@@ -979,27 +979,31 @@ class _ChatInfoPanelState extends State<ChatInfoPanel> {
   }
 
   Widget _galleryThumb(Msg m) {
-    if (m.mediaPath != null && m.media != 'video') {
-      final f = File(m.mediaPath!);
-      if (f.existsSync()) {
-        return Image.file(f, fit: BoxFit.cover);
-      }
+    if (m.downloaded && m.mediaPath != null && m.media != 'video') {
+      return Image.file(
+        File(m.mediaPath!),
+        fit: BoxFit.cover,
+        cacheWidth: 160,
+        errorBuilder: (_, _, _) => _thumbOrIcon(m),
+      );
     }
-    if (m.thumbBase64 != null) {
-      try {
-        final bytes = base64Decode(m.thumbBase64!);
-        return Stack(
-          fit: StackFit.expand,
-          children: [
-            Image.memory(bytes, fit: BoxFit.cover),
-            if (m.media == 'video')
-              const Center(
-                child: Icon(Icons.play_circle_filled,
-                    color: Colors.white70, size: 22),
-              ),
-          ],
-        );
-      } catch (_) {}
+    return _thumbOrIcon(m);
+  }
+
+  Widget _thumbOrIcon(Msg m) {
+    final bytes = m.thumbBytes;
+    if (bytes != null) {
+      return Stack(
+        fit: StackFit.expand,
+        children: [
+          Image.memory(bytes, fit: BoxFit.cover),
+          if (m.media == 'video')
+            const Center(
+              child: Icon(Icons.play_circle_filled,
+                  color: Colors.white70, size: 22),
+            ),
+        ],
+      );
     }
     return Icon(
       m.media == 'video' ? Icons.videocam_outlined : Icons.image_outlined,
