@@ -313,6 +313,20 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::EnsureBackendRunning() {
+  if (quit_requested_) {
+    return;
+  }
+  if (backend_process_) {
+    if (WaitForSingleObject(backend_process_, 0) == WAIT_TIMEOUT) {
+      return;
+    }
+    CloseHandle(backend_process_);
+    backend_process_ = nullptr;
+    if (backend_job_) {
+      CloseHandle(backend_job_);
+      backend_job_ = nullptr;
+    }
+  }
   if (IsBridgePortOpen()) {
     return;
   }
@@ -421,6 +435,9 @@ void FlutterWindow::InitTrayChannel() {
           result->Success();
         } else if (call.method_name() == "hide") {
           HideToTray();
+          result->Success();
+        } else if (call.method_name() == "ensureBackend") {
+          EnsureBackendRunning();
           result->Success();
         } else if (call.method_name() == "quit") {
           quit_requested_ = true;

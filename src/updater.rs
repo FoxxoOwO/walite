@@ -225,7 +225,7 @@ fn windows_update_script(pid: u32, dir: &Path, exe: &Path, archive: &Path) -> St
          $stage = Join-Path $env:TEMP 'warust-unpack'\r\n\
          $p = Get-Process -Id {pid} -ErrorAction SilentlyContinue\r\n\
          if ($p) {{ $p.WaitForExit() }}\r\n\
-         $guiProc = Get-Process -Name 'warust_gui' -ErrorAction SilentlyContinue | Where-Object {{\r\n\
+         $guiProc = Get-Process -Name 'warust_gui', 'warust' -ErrorAction SilentlyContinue | Where-Object {{\r\n\
          \x20 try {{ $_.Path -and ([IO.Path]::GetDirectoryName($_.Path).TrimEnd('\\') -ieq $dir.TrimEnd('\\')) }} catch {{ $false }}\r\n\
          }}\r\n\
          if ($guiProc) {{\r\n\

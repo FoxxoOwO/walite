@@ -162,7 +162,28 @@ fn spawn_activation_listener(handle: notify_rust::NotificationHandle, chat_jid: 
     }
 }
 
+/// Permanently increments the process COM Multi-Threaded Apartment (MTA)
+/// usage count on Windows so temporary WASAPI audio threads calling
+/// `CoUninitialize` on exit never drop the MTA refcount to zero and unload
+/// in-proc WinRT DLLs (`Windows.Data.Xml.Dom.dll`) cached by `windows-core`.
+#[cfg(target_os = "windows")]
+pub fn ensure_com_mta() {
+    use std::sync::Once;
+    #[link(name = "ole32")]
+    extern "system" {
+        fn CoIncrementMTAUsage(pcookie: *mut *mut std::ffi::c_void) -> i32;
+    }
+    static INIT: Once = Once::new();
+    INIT.call_once(|| unsafe {
+        let mut cookie = std::ptr::null_mut();
+        let _ = CoIncrementMTAUsage(&mut cookie);
+    });
+}
+
 fn show_toast_for_chat(chat_jid: Option<&str>, title: &str, body: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    ensure_com_mta();
+
     let mut notification = notify_rust::Notification::new();
     notification
         .summary(title)
@@ -277,6 +298,9 @@ pub fn play_sound_preview(preset: Option<&str>, custom_path: Option<&str>) {
 
 fn play_sound_blocking(preset: &str, custom_path: Option<&str>) -> Result<(), String> {
     use rodio::Source;
+
+    #[cfg(target_os = "windows")]
+    ensure_com_mta();
 
     let stream = rodio::DeviceSinkBuilder::open_default_sink()
         .map_err(|e| format!("no audio device: {e}"))?;
@@ -451,5 +475,12 @@ mod tests {
             .map(|w| (w[1] - w[0]).abs())
             .fold(0.0_f32, f32::max);
         assert!(max_step < 0.04, "unexpected waveform jump: {max_step}");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn ensure_com_mta_is_idempotent() {
+        ensure_com_mta();
+        ensure_com_mta();
     }
 }

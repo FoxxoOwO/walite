@@ -50,6 +50,9 @@ fn main() -> Result<()> {
     // reported from a window that was never attached to a console.
     logging::init();
 
+    #[cfg(target_os = "windows")]
+    crate::notifications::ensure_com_mta();
+
     tracing::info!("Starting Warust v{}", env!("CARGO_PKG_VERSION"));
 
 

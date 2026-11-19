@@ -45,6 +45,22 @@ class _WarustAppState extends State<WarustApp> with WidgetsBindingObserver {
   StreamSubscription<String?>? _actSub;
   final _droppedFiles = StreamController<List<String>>.broadcast();
   String? _lastTrayKey;
+  Timer? _backendWatchdog;
+
+  void _updateBackendWatchdog(bool linked) {
+    _backendWatchdog?.cancel();
+    _backendWatchdog = null;
+    if (!linked) {
+      _backendWatchdog = Timer.periodic(const Duration(seconds: 3), (_) async {
+        if (_linked || !mounted) return;
+        try {
+          await _trayChannel.invokeMethod<void>('ensureBackend');
+        } on MissingPluginException {
+          // Non-Windows or test harness.
+        }
+      });
+    }
+  }
 
   bool _isFocused() {
     final s = WidgetsBinding.instance.lifecycleState;
@@ -93,6 +109,7 @@ class _WarustAppState extends State<WarustApp> with WidgetsBindingObserver {
       if (linked) {
         _bridge.setWindowFocused(_isFocused());
       }
+      _updateBackendWatchdog(linked);
       if (mounted) setState(() => _linked = linked);
     });
     _snapSub = _bridge.snapshots.listen((snap) {
@@ -107,6 +124,7 @@ class _WarustAppState extends State<WarustApp> with WidgetsBindingObserver {
       }
     });
     _bridge.connect();
+    _updateBackendWatchdog(false);
   }
 
   @override
@@ -116,6 +134,7 @@ class _WarustAppState extends State<WarustApp> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _backendWatchdog?.cancel();
     _trayChannel.setMethodCallHandler(null);
     WidgetsBinding.instance.removeObserver(this);
     _linkSub?.cancel();
