@@ -7,6 +7,17 @@ are also published on the [Releases page](https://github.com/FoxxoOwO/walite/rel
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-11-19
+
+### Fixed
+- **Windows Runner & Process Handling**: Switched `IsBridgePortOpen()` to a non-blocking socket check with a 100 ms timeout, fixed `HICON` handle leaks in the tray and taskbar overlay updater, null-guarded `WM_FONTCHANGE`, hid console windows (`CREATE_NO_WINDOW`) for `ffmpeg`/`ffprobe`/`reg` subprocesses, ensured COM MTA initialization before capture/playback, and fixed `show_in_folder` paths containing spaces.
+- **State, Storage & Notifications**: Merged `unread_count`, `is_archived`, `drafts`, `pinned`, and `ephemeral` from LID to canonical PN in `consolidate_canonical_chats`; fixed `ClearChat`, `DeleteChat`, and `Disconnect` cleanup (`data_dir/messages` + cache clearing); added `play_sound_if_unfocused()` respecting focus and the rate limiter; resolved `SearchScope::CurrentChat` canonical JIDs and local `SearchDateRange::Today` dates; fixed `start_chat` canonicalization/`dirty` marking, `select(null)`, `clean_media` freed-byte accounting, and `export_chat` error reporting.
+- **Flutter GUI & Lifecycle**: Ignored `:device` suffixes via `sameJidUser()` in group admin checks, mentions, and participant lists; added `Bridge._disposed` and malformed-frame guards; completed cross-window `jumpToMessage` scrolling when older snapshots arrive; cancelled active timers/recording/poll drafts on chat switch; prevented stale draft wipes when canceling `ScheduleMessageDialog` or `ExportChatDialog`; fixed the 24 px `RenderFlex` overflow in `ScheduleMessageDialog`, `TapGestureRecognizer` leaks in rich text, and async/init disposal safety in video players.
+
+### Performance
+- **Backend & Persistence**: Serialized `Store::persist` through `PERSIST_LOCK` with borrowed message snapshots and `spawn_blocking` JSON encoding; avoided idle write locks in the scheduled dispatcher; indexed `add_messages_batch` deduplication; added zero-alloc ASCII link matching; offloaded blocking WebSocket bridge handlers (`clipboard`, `audio`, `recorder`, `export`, `media_stats`, `clean_media`, notifications) off the async loop; cached sticker listings (including empty directories), 5-second media file existence checks, and thumbnail base64 strings; switched snapshots to typed `Serialize` structs.
+- **Flutter Rendering**: Eliminated synchronous `existsSync()` and repeated `base64Decode()` calls from bubble/avatar/wallpaper/gallery builds via cached `Msg.thumbBytes` and `cacheWidth`/`errorBuilder`; added `O(1)` lookup maps on `Snapshot`; hoisted `RegExp` patterns; isolated wallpaper doodles in a `RepaintBoundary`; scoped composer updates with `ValueListenableBuilder`; switched `ChatListPanel` to `ListView.builder` with 120 ms search debouncing; deferred `requestMediaStats()` until opening the storage tab.
+
 ## [1.0.3] - 2026-11-19
 
 ### Fixed
