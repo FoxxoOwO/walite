@@ -7,6 +7,11 @@ are also published on the [Releases page](https://github.com/FoxxoOwO/walite/rel
 
 ## [Unreleased]
 
+## [1.0.5] - 2026-11-19
+
+### Fixed
+- **Duplicate Unread Badge Counts**: Removed the duplicate `BotBuilder::on_message` registration in `src/backend.rs` (incoming messages were already dispatched through `Event::Messages(batch)` in `handle_event`), and updated `AppState::add_message` to return whether a message was newly inserted so duplicate deliveries or reaction-only text never increment `unread_count` or trigger duplicate notifications.
+
 ## [1.0.4] - 2026-11-19
 
 ### Fixed
