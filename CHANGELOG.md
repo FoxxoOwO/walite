@@ -11,6 +11,7 @@ are also published on the [Releases page](https://github.com/FoxxoOwO/walite/rel
 
 ### Fixed
 - **Duplicate Unread Badge Counts**: Removed the duplicate `BotBuilder::on_message` registration in `src/backend.rs` (incoming messages were already dispatched through `Event::Messages(batch)` in `handle_event`), and updated `AppState::add_message` to return whether a message was newly inserted so duplicate deliveries or reaction-only text never increment `unread_count` or trigger duplicate notifications.
+- **WhatsApp Stories / Status Filtering**: Ignored incoming WhatsApp Status/Story updates (`status@broadcast`, group status / status mention / notification wrappers, and `ContextInfo.is_group_status`) in both live message handling and history sync so they never create chats, unread badges, notifications, or read receipts, and pruned any already-persisted `status@broadcast` entries on load.
 
 ## [1.0.4] - 2026-11-19
 
