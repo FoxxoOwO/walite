@@ -7,6 +7,14 @@ are also published on the [Releases page](https://github.com/FoxxoOwO/walite/rel
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-11-19
+
+### Fixed
+- **Ctrl+V Text Paste**: Replaced `CallbackShortcuts` in the message composer with a `Focus.onKeyEvent` handler that lets `TextField` process normal text paste while still triggering clipboard image paste.
+- **Windows COM MTA Stability**: Pinned the Windows COM Multi-Threaded Apartment refcount via `CoIncrementMTAUsage` (`ensure_com_mta`) at startup, before toast notifications, and before WASAPI audio playback so exiting audio threads never unload cached WinRT DLLs (`Windows.Data.Xml.Dom.dll`).
+- **Backend Auto-Restart Watchdog**: Added a 3-second watchdog in the Flutter GUI (`ensureBackend`) and dead-process cleanup in `FlutterWindow::EnsureBackendRunning()` to automatically relaunch `warust.exe` if the backend disconnects or exits unexpectedly.
+- **Windows Auto-Updater Process Cleanup**: Updated the PowerShell self-updater script to terminate both `warust_gui` and `warust` in the install folder before extracting and replacing files.
+
 ## [1.0.2] - 2026-11-17
 
 ### Fixed
