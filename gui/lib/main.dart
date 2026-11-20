@@ -46,6 +46,7 @@ class _WarustAppState extends State<WarustApp> with WidgetsBindingObserver {
   final _droppedFiles = StreamController<List<String>>.broadcast();
   String? _lastTrayKey;
   Timer? _backendWatchdog;
+  bool? _nativeWindowFocused;
 
   void _updateBackendWatchdog(bool linked) {
     _backendWatchdog?.cancel();
@@ -63,6 +64,9 @@ class _WarustAppState extends State<WarustApp> with WidgetsBindingObserver {
   }
 
   bool _isFocused() {
+    if (_nativeWindowFocused != null) {
+      return _nativeWindowFocused!;
+    }
     final s = WidgetsBinding.instance.lifecycleState;
     return s == null || s == AppLifecycleState.resumed;
   }
@@ -98,7 +102,9 @@ class _WarustAppState extends State<WarustApp> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _trayChannel.setMethodCallHandler((call) async {
       if (call.method == 'onWindowFocus') {
-        _bridge.setWindowFocused(call.arguments == true);
+        final focused = call.arguments == true;
+        _nativeWindowFocused = focused;
+        _bridge.setWindowFocused(focused);
       } else if (call.method == 'onFilesDropped' && call.arguments is List) {
         final paths = (call.arguments as List).whereType<String>().toList();
         if (paths.isNotEmpty) {
@@ -130,6 +136,9 @@ class _WarustAppState extends State<WarustApp> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // On Windows desktop, Win32 native focus (onWindowFocus) is authoritative
+    // because SW_HIDE to the system tray does not always change lifecycleState.
+    if (_nativeWindowFocused != null) return;
     _bridge.setWindowFocused(state == AppLifecycleState.resumed);
   }
 

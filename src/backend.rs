@@ -1008,7 +1008,10 @@ async fn handle_incoming_message(
             crate::storage::persist_or_log(&state).await;
         }
 
-        if !from_me {
+        let actively_viewing = !from_me
+            && crate::notifications::window_focused()
+            && state.read().selected_chat.as_ref() == Some(&canon_chat_jid);
+        if actively_viewing {
             let client = client.clone();
             let chat_jid = chat_jid.clone();
             let sender_opt = if info.source.is_group { Some(sender_jid) } else { None };
@@ -1181,7 +1184,7 @@ async fn handle_incoming_message(
     }
 
     // Update state
-    let inserted = {
+    let (inserted, actively_viewing) = {
         let mut s = state.write();
         let push_name = info.push_name.to_string();
         let has_real_push_name = crate::util::is_real_name(&push_name);
@@ -1224,19 +1227,30 @@ async fn handle_incoming_message(
             chat.name = push_name;
         }
         
+        let actively_viewing = !from_me
+            && crate::notifications::window_focused()
+            && s.selected_chat.as_ref() == Some(&canon_chat_jid);
+
         // Add message
         let mut msg_canon = msg;
         msg_canon.chat_jid = canon_chat_jid.clone();
+        if actively_viewing {
+            msg_canon.status = MessageStatus::Read;
+        }
         let inserted = s.add_message(msg_canon);
         s.consolidate_canonical_chats();
 
-        // Bump unread badge for newly inserted messages the user has not looked at yet
-        if inserted && !from_me && s.selected_chat.as_ref() != Some(&canon_chat_jid) {
+        // Bump unread badge for newly inserted messages the user has not actively looked at yet
+        if inserted && !from_me && !actively_viewing {
             if let Some(chat) = s.chats.get_mut(&canon_chat_jid) {
                 chat.unread_count = chat.unread_count.saturating_add(1);
             }
+            let entry = s.pending_read_receipts.entry(canon_chat_jid.clone()).or_default();
+            if !entry.iter().any(|(_, existing_id)| existing_id == &msg_id) {
+                entry.push((sender_jid.clone(), msg_id.clone()));
+            }
         }
-        inserted
+        (inserted, actively_viewing)
     };
     
     // A message that names us deserves a louder ping than a plain one.
@@ -1292,8 +1306,8 @@ async fn handle_incoming_message(
         }
     }
 
-    // Auto-send read receipt for non-own messages
-    if !from_me {
+    // Auto-send read receipt ONLY when the user is actively viewing this chat in a focused window
+    if inserted && !from_me && actively_viewing {
         let client = client.clone();
         let chat_jid = chat_jid.clone();
         let sender_jid = sender_jid.clone();
@@ -1310,6 +1324,31 @@ async fn handle_incoming_message(
                 debug!("Failed to send read receipt: {}", e);
             }
         });
+    }
+}
+
+async fn flush_chat_read_receipts(
+    client: &Arc<Client>,
+    state: &SharedState,
+    chat_jid: &Jid,
+) {
+    let (canon, batches, marked_any) = {
+        let mut s = state.write();
+        let marked = s.mark_chat_read_locally(chat_jid);
+        let (canon, batches) = s.take_pending_read_receipts(chat_jid);
+        (canon, batches, marked)
+    };
+    for (sender_opt, ids) in &batches {
+        let refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+        if let Err(e) = client.mark_as_read(&canon, sender_opt.as_ref(), &refs).await {
+            debug!("Failed to send read receipt for {}: {}", canon, e);
+        }
+    }
+    if marked_any || !batches.is_empty() {
+        if let Err(e) = client.chat_actions().mark_chat_as_read(&canon, true, None).await {
+            debug!("Failed to sync mark_chat_as_read for {}: {}", canon, e);
+        }
+        crate::storage::persist_or_log(state).await;
     }
 }
 
@@ -3359,7 +3398,7 @@ async fn handle_command(
         }
         
         Command::MarkChatAsRead { chat_jid } => {
-            client.chat_actions().mark_chat_as_read(&chat_jid, true, None).await?;
+            flush_chat_read_receipts(&client, &state, &chat_jid).await;
         }
         
         Command::ArchiveChat { chat_jid } => {
@@ -3441,6 +3480,8 @@ async fn handle_command(
                 s.history_syncing_chats.remove(&chat_jid);
                 s.history_exhausted_chats.remove(&canon);
                 s.history_exhausted_chats.remove(&chat_jid);
+                s.pending_read_receipts.remove(&canon);
+                s.pending_read_receipts.remove(&chat_jid);
                 if s.selected_chat.as_ref().is_some_and(|sel| {
                     let sel_canon = s.canonical_jid(sel);
                     sel == &chat_jid || sel == &canon || sel_canon == canon
@@ -3477,6 +3518,8 @@ async fn handle_command(
                 }
                 s.pinned.remove(&canon);
                 s.pinned.remove(&chat_jid);
+                s.pending_read_receipts.remove(&canon);
+                s.pending_read_receipts.remove(&chat_jid);
             }
             res?;
         }
@@ -4044,6 +4087,9 @@ async fn handle_command(
                 s.selected_chat = canon_jid.clone().or(chat_jid.clone());
             }
             if let Some(target_jid) = canon_jid {
+                if crate::notifications::window_focused() {
+                    flush_chat_read_receipts(&client, &state, &target_jid).await;
+                }
                 let (oldest_id, from_me, timestamp_ms, msg_count) = {
                     let s = state.read();
                     if let Some(msgs) = s.get_chat_messages(&target_jid) {

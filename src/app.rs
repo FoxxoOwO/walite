@@ -97,8 +97,28 @@ impl eframe::App for WarustApp {
         crate::i18n::set_language(self.state.read().preferences.language);
 
         // Track focus so incoming messages only toast when the user is elsewhere.
+        let prev_focused = crate::notifications::window_focused();
         let focused = ui.input(|i| i.viewport().focused).unwrap_or(true);
         crate::notifications::set_window_focused(focused);
+        if focused && !prev_focused {
+            let selected_to_read = {
+                let mut s = self.state.write();
+                if let Some(sel) = s.selected_chat.clone() {
+                    if s.mark_chat_read_locally(&sel) {
+                        Some(sel)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+            if let (Some(jid), Some(backend)) = (selected_to_read, &self.backend) {
+                let _ = backend.send_command(crate::commands::Command::MarkChatAsRead {
+                    chat_jid: jid,
+                });
+            }
+        }
 
         // Handle system tray messages
         if let Some(tray) = &self.tray {

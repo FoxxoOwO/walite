@@ -133,18 +133,18 @@ pub async fn run(port: u16) -> Result<()> {
             while let Ok(chat_opt) = rx.recv().await {
                 if let Some(ref raw_chat) = chat_opt {
                     if let Ok(jid) = raw_chat.parse::<Jid>() {
-                        {
+                        let canon = {
                             let mut s = backend.state.write();
                             let canon = s.canonical_jid(&jid);
                             if s.selected_chat.as_ref() != Some(&canon) {
                                 MESSAGE_LIMIT.store(MESSAGE_WINDOW, Ordering::Relaxed);
                             }
                             s.selected_chat = Some(canon.clone());
-                            if let Some(c) = s.chats.get_mut(&canon) {
-                                c.unread_count = 0;
-                            }
-                        }
+                            s.mark_chat_read_locally(&canon);
+                            canon
+                        };
                         let _ = backend.send_command(Command::select_chat(Some(jid)));
+                        let _ = backend.send_command(Command::MarkChatAsRead { chat_jid: canon });
                         snap_notify.notify_one();
                     }
                 }
@@ -243,6 +243,23 @@ fn handle_command(
         Some("window_focus") => {
             let focused = value["focused"].as_bool().unwrap_or(false);
             crate::notifications::set_window_focused(focused);
+            if focused {
+                let selected_to_read = {
+                    let mut s = backend.state.write();
+                    if let Some(sel) = s.selected_chat.clone() {
+                        if s.mark_chat_read_locally(&sel) {
+                            Some(sel)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                };
+                if let Some(jid) = selected_to_read {
+                    let _ = backend.send_command(Command::MarkChatAsRead { chat_jid: jid });
+                }
+            }
         }
         Some("connect") => {
             let _ = backend.send_command(Command::Connect);
@@ -271,8 +288,8 @@ fn handle_command(
                 let mut s = backend.state.write();
                 let canon = s.canonical_jid(j);
                 s.selected_chat = Some(canon.clone());
-                if let Some(chat) = s.chats.get_mut(&canon) {
-                    chat.unread_count = 0;
+                if crate::notifications::window_focused() {
+                    s.mark_chat_read_locally(&canon);
                 }
             } else {
                 backend.state.write().selected_chat = None;
@@ -557,8 +574,8 @@ fn handle_command(
                     let mut s = backend.state.write();
                     let canon = s.canonical_jid(&jid);
                     s.selected_chat = Some(canon.clone());
-                    if let Some(chat) = s.chats.get_mut(&canon) {
-                        chat.unread_count = 0;
+                    if crate::notifications::window_focused() {
+                        s.mark_chat_read_locally(&canon);
                     }
                     s.get_chat_messages(&canon).and_then(|msgs| {
                         msgs.iter()
@@ -577,6 +594,7 @@ fn handle_command(
         }
         Some("read") => {
             if let Some(jid) = jid_field(&value, "chat") {
+                backend.state.write().mark_chat_read_locally(&jid);
                 let _ = backend.send_command(Command::MarkChatAsRead { chat_jid: jid });
             }
         }

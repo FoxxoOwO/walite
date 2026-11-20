@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use chrono::{DateTime, Utc};
-use whatsapp_rust::wacore_binary::Jid;
+use whatsapp_rust::wacore_binary::{Jid, JidExt};
 use serde::{Deserialize, Serialize};
 use parking_lot::RwLock;
 
@@ -871,6 +871,10 @@ pub struct AppState {
     /// Chats whose older history on the primary phone returned no further batches.
     #[serde(skip)]
     pub history_exhausted_chats: HashSet<Jid>,
+    /// Unread incoming `(sender_jid, msg_id)` pairs awaiting `<receipt type="read">`
+    /// once the user actually views the chat in a focused window.
+    #[serde(skip)]
+    pub pending_read_receipts: HashMap<Jid, Vec<(Jid, String)>>,
 }
 
 impl Default for AppState {
@@ -953,6 +957,7 @@ impl Default for AppState {
             show_archived: false,
             history_syncing_chats: HashSet::new(),
             history_exhausted_chats: HashSet::new(),
+            pending_read_receipts: HashMap::new(),
         }
     }
 }
@@ -1397,6 +1402,15 @@ impl AppState {
             if let Some(exp) = self.ephemeral.remove(&lid_jid) {
                 self.ephemeral.entry(pn_jid.clone()).or_insert(exp);
             }
+            if let Some(pending) = self.pending_read_receipts.remove(&lid_jid) {
+                let dst = self.pending_read_receipts.entry(pn_jid.clone()).or_default();
+                for (sender, id) in pending {
+                    let canon_sender = self.lid_to_pn.get(&sender).cloned().unwrap_or(sender);
+                    if !dst.iter().any(|(_, existing_id)| existing_id == &id) {
+                        dst.push((canon_sender, id));
+                    }
+                }
+            }
 
             // 3. If selected_chat was the LID, update to PN
             if self.selected_chat.as_ref() == Some(&lid_jid) {
@@ -1596,6 +1610,67 @@ impl AppState {
         let incoming: Vec<&Message> = messages.iter().filter(|m| !m.from_me).collect();
         let start = incoming.len().saturating_sub(unread);
         incoming.get(start).map(|m| m.id.clone())
+    }
+
+    /// Zeroes `unread_count` for `chat_jid` and queues its unread incoming
+    /// messages into `pending_read_receipts` so the backend can send `<receipt type="read">`.
+    /// Returns `true` if `unread_count` was cleared or pending read receipts remain queued.
+    pub fn mark_chat_read_locally(&mut self, chat_jid: &Jid) -> bool {
+        let canon = self.canonical_jid(chat_jid);
+        let unread = self
+            .chats
+            .get(&canon)
+            .map(|c| c.unread_count as usize)
+            .unwrap_or(0);
+        if unread > 0 {
+            if let Some(chat) = self.chats.get_mut(&canon) {
+                chat.unread_count = 0;
+            }
+            self.dirty = true;
+            let mut newly_queued = Vec::new();
+            if let Some(msgs) = self.messages.get_mut(&canon) {
+                for m in msgs.iter_mut().rev().filter(|m| !m.from_me).take(unread) {
+                    m.status = MessageStatus::Read;
+                    newly_queued.push((m.sender_jid.clone(), m.id.clone()));
+                }
+            }
+            newly_queued.reverse();
+            let entry = self.pending_read_receipts.entry(canon.clone()).or_default();
+            for (sender, id) in newly_queued {
+                if !entry.iter().any(|(_, existing_id)| existing_id == &id) {
+                    entry.push((sender, id));
+                }
+            }
+            return true;
+        }
+        !self
+            .pending_read_receipts
+            .get(&canon)
+            .map_or(true, Vec::is_empty)
+    }
+
+    /// Drains pending `(sender_jid, msg_id)` read receipts for `chat_jid`,
+    /// grouped by `Option<Jid>` (`Some(sender)` for group chats, `None` for DMs).
+    pub fn take_pending_read_receipts(
+        &mut self,
+        chat_jid: &Jid,
+    ) -> (Jid, Vec<(Option<Jid>, Vec<String>)>) {
+        let canon = self.canonical_jid(chat_jid);
+        let is_group = self
+            .chats
+            .get(&canon)
+            .map(|c| c.is_group)
+            .unwrap_or_else(|| canon.is_group());
+        let raw = self.pending_read_receipts.remove(&canon).unwrap_or_default();
+        let mut by_sender: HashMap<Option<Jid>, Vec<String>> = HashMap::new();
+        for (sender, id) in raw {
+            let key = if is_group { Some(sender) } else { None };
+            let list = by_sender.entry(key).or_default();
+            if !list.contains(&id) {
+                list.push(id);
+            }
+        }
+        (canon, by_sender.into_iter().collect())
     }
 
     pub fn apply_reaction(&mut self, chat_jid: &Jid, target_msg_id: &str, sender_jid: &Jid, emoji: &str) -> bool {
@@ -2984,5 +3059,41 @@ mod selection_tests {
         assert_eq!(state.messages.get(&chat).unwrap().len(), 1);
         assert_eq!(state.messages.get(&chat).unwrap()[0].reactions.len(), 1);
         assert_eq!(state.messages.get(&chat).unwrap()[0].reactions[0].emoji, "👍");
+    }
+
+    #[test]
+    fn mark_chat_read_locally_queues_only_unread_incoming_messages() {
+        let mut state = AppState::default();
+        let chat: Jid = "420111222333@s.whatsapp.net".parse().unwrap();
+        let ts = Utc::now();
+
+        let _ = state.get_or_create_chat(chat.clone(), "Petr".into(), false);
+        for (i, id) in ["OLD_1", "NEW_1", "NEW_2"].iter().enumerate() {
+            state.add_message(Message::new_text(
+                (*id).into(),
+                chat.clone(),
+                chat.clone(),
+                format!("msg {id}"),
+                ts + chrono::Duration::seconds(i as i64),
+                false,
+                MessageStatus::Delivered,
+                None,
+                None,
+            ));
+        }
+        state.chats.get_mut(&chat).unwrap().unread_count = 2;
+
+        assert!(state.mark_chat_read_locally(&chat));
+        assert_eq!(state.chats.get(&chat).unwrap().unread_count, 0);
+
+        // A second local mark before backend drains pending_read_receipts must preserve the queue.
+        assert!(state.mark_chat_read_locally(&chat));
+
+        let (canon, batches) = state.take_pending_read_receipts(&chat);
+        assert_eq!(canon, chat);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].0, None);
+        assert_eq!(batches[0].1, vec!["NEW_1".to_string(), "NEW_2".to_string()]);
+        assert!(!state.mark_chat_read_locally(&chat));
     }
 }

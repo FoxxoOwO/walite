@@ -436,6 +436,7 @@ bool FlutterWindow::OnCreate() {
       this->NotifyFocus(false);
     } else {
       this->Show();
+      this->NotifyFocus(true);
     }
   });
 
@@ -570,6 +571,12 @@ void FlutterWindow::InitTrayChannel() {
           }
           CreateOrUpdateTrayIcon();
           UpdateTaskbarOverlay();
+          if (HWND hwnd = GetHandle()) {
+            HWND fg = GetForegroundWindow();
+            bool focused = IsWindowVisible(hwnd) && !IsIconic(hwnd) &&
+                           (fg == hwnd || (fg && IsChild(hwnd, fg)));
+            NotifyFocus(focused);
+          }
           result->Success();
         } else if (call.method_name() == "show") {
           RestoreFromTray();
@@ -810,6 +817,16 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     case WM_ACTIVATE:
       NotifyFocus(LOWORD(wparam) != WA_INACTIVE && IsWindowVisible(hwnd) &&
                   !IsIconic(hwnd));
+      break;
+    case WM_ACTIVATEAPP:
+      if (!wparam) {
+        NotifyFocus(false);
+      }
+      break;
+    case WM_SHOWWINDOW:
+      if (!wparam) {
+        NotifyFocus(false);
+      }
       break;
     case WM_SIZE:
       if (wparam == SIZE_MINIMIZED) {

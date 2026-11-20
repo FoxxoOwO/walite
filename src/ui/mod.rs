@@ -65,9 +65,7 @@ pub fn open_chat(state: &mut AppState, jid: &Jid, backend: &BackendHandle) {
     } else {
         jid.clone()
     };
-    if let Some(chat) = state.chats.get_mut(&target_key) {
-        chat.unread_count = 0;
-    }
+    state.mark_chat_read_locally(&target_key);
 
     let has_messages = state
         .messages
