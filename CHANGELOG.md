@@ -7,6 +7,11 @@ are also published on the [Releases page](https://github.com/FoxxoOwO/walite/rel
 
 ## [Unreleased]
 
+## [1.0.7] - 2026-11-20
+
+### Fixed
+- **Read Receipts & Unread Counts When Window Is Closed/Unfocused**: Stopped `handle_incoming_message` from unconditionally sending `<receipt type="read">` (`client.mark_as_read`) on arrival when the window is hidden in the system tray, minimized, unfocused, or viewing a different chat; ensured incoming messages to the last-selected chat still increment `unread_count` while the window is unfocused/closed; queued unread message IDs in `pending_read_receipts` and flushed read receipts only when the chat is actively viewed in a focused window; made native Win32 visibility/foreground state (`_nativeWindowFocused`) authoritative over Flutter `AppLifecycleState.resumed` when hidden to tray (`SW_HIDE`).
+
 ## [1.0.6] - 2026-11-20
 
 ### Added
