@@ -75,13 +75,14 @@ class _WarustAppState extends State<WarustApp> with WidgetsBindingObserver {
         ? 'WaLite ($unread ${tr.t('nepřečtených', 'unread')})'
         : 'WaLite';
     final key =
-        '${snap.prefs.runInTray}|${snap.prefs.closeToTray}|$lang|$tooltip';
+        '${snap.prefs.runInTray}|${snap.prefs.closeToTray}|${snap.prefs.monochromeTrayIcon}|$lang|$tooltip|$unread';
     if (key == _lastTrayKey) return;
     _lastTrayKey = key;
     try {
       await _trayChannel.invokeMethod<void>('update', {
         'runInTray': snap.prefs.runInTray,
         'closeToTray': snap.prefs.closeToTray,
+        'monochrome': snap.prefs.monochromeTrayIcon,
         'lang': lang,
         'tooltip': tooltip,
         'unread': unread,

@@ -54,6 +54,7 @@ class FlutterWindow : public Win32Window {
   bool tray_added_ = false;
   bool run_in_tray_ = true;
   bool close_to_tray_ = true;
+  bool monochrome_tray_ = false;
   bool quit_requested_ = false;
   int unread_count_ = 0;
   HICON badge_tray_icon_ = nullptr;

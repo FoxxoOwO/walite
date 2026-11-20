@@ -555,5 +555,12 @@ fn show_system_settings(ui: &mut Ui, s: &mut crate::state::AppState) {
                 .font(FontId::proportional(11.0))
                 .color(Color32::from_rgb(0x86, 0x96, 0xA0))
         );
+        ui.add_space(8.0);
+        ui.checkbox(&mut s.preferences.monochrome_tray_icon, "Monochromatická ikona v oznamovací oblasti (Windows styl)");
+        ui.label(
+            RichText::new("Zobrazí jednobarevnou siluetu ikony přizpůsobenou tmavému nebo světlému hlavnímu panelu Windows.")
+                .font(FontId::proportional(11.0))
+                .color(Color32::from_rgb(0x86, 0x96, 0xA0))
+        );
     });
 }

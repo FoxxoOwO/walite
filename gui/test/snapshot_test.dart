@@ -280,6 +280,7 @@ void main() {
         'dark_theme_preset': 2,
         'auto_scroll_to_bottom': false,
         'start_with_windows': true,
+        'monochrome_tray_icon': true,
       },
       'messages': [
         {
@@ -322,6 +323,7 @@ void main() {
     expect(snapshot.prefs.darkThemePreset, 2);
     expect(snapshot.prefs.autoScrollToBottom, isFalse);
     expect(snapshot.prefs.startWithWindows, isTrue);
+    expect(snapshot.prefs.monochromeTrayIcon, isTrue);
     expect(snapshot.messages.single.reactionDetails, hasLength(2));
     expect(snapshot.messages.single.mediaPath, '/tmp/v.ogg');
     expect(snapshot.messages.single.fileSize, 4096);

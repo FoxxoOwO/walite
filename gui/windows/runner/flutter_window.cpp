@@ -284,6 +284,116 @@ HICON CreateTrayBadgedIcon(HICON base_icon, int size) {
   DrawCircleAa(pixels.data(), size, cx, cy, rad, 255, 59, 48);
   return BuildIconFromPixels(pixels, size);
 }
+
+bool IsWindowsSystemLightTheme() {
+  DWORD value = 0;
+  DWORD size = sizeof(value);
+  LSTATUS st = RegGetValueW(
+      HKEY_CURRENT_USER,
+      L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+      L"SystemUsesLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size);
+  return st == ERROR_SUCCESS && value != 0;
+}
+
+HICON CreateMonochromeTrayIcon(int size, bool light_taskbar, bool badged) {
+  if (size <= 0) return nullptr;
+  const int src_size = std::max(64, size * 4);
+  HICON src_icon = reinterpret_cast<HICON>(LoadImageW(
+      GetModuleHandle(nullptr), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+      src_size, src_size, LR_DEFAULTCOLOR | LR_SHARED));
+  if (!src_icon) return nullptr;
+
+  BITMAPINFO bi{};
+  bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bi.bmiHeader.biWidth = src_size;
+  bi.bmiHeader.biHeight = -src_size;
+  bi.bmiHeader.biPlanes = 1;
+  bi.bmiHeader.biBitCount = 32;
+  bi.bmiHeader.biCompression = BI_RGB;
+
+  void* dib_bits = nullptr;
+  HDC screen = GetDC(nullptr);
+  HDC mem = CreateCompatibleDC(screen);
+  HBITMAP hbm =
+      CreateDIBSection(mem, &bi, DIB_RGB_COLORS, &dib_bits, nullptr, 0);
+  if (!hbm || !dib_bits) {
+    if (hbm) DeleteObject(hbm);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+    return nullptr;
+  }
+  HGDIOBJ old = SelectObject(mem, hbm);
+  ZeroMemory(dib_bits, static_cast<size_t>(src_size) * src_size * 4);
+  DrawIconEx(mem, 0, 0, src_icon, src_size, src_size, 0, nullptr, DI_NORMAL);
+  GdiFlush();
+
+  std::vector<uint32_t> src_pixels(static_cast<size_t>(src_size) * src_size);
+  memcpy(src_pixels.data(), dib_bits, src_pixels.size() * 4);
+
+  SelectObject(mem, old);
+  DeleteObject(hbm);
+  DeleteDC(mem);
+  ReleaseDC(nullptr, screen);
+
+  // Extract the white speech-bubble + phone silhouette from the center of the
+  // app icon ([0.1875..0.8125]) with 4x4 supersampling so it fills the Windows
+  // tray slot cleanly on a transparent background.
+  const uint8_t fg_r = light_taskbar ? 24 : 255;
+  const uint8_t fg_g = light_taskbar ? 24 : 255;
+  const uint8_t fg_b = light_taskbar ? 24 : 255;
+  constexpr double kCropMin = 0.1875;
+  constexpr double kCropSpan = 0.625;
+  constexpr int kSub = 4;
+
+  std::vector<uint32_t> pixels(static_cast<size_t>(size) * size, 0);
+  bool any_alpha = false;
+  for (int oy = 0; oy < size; ++oy) {
+    for (int ox = 0; ox < size; ++ox) {
+      double acc = 0.0;
+      for (int sy = 0; sy < kSub; ++sy) {
+        double v = kCropMin + ((oy + (sy + 0.5) / kSub) / size) * kCropSpan;
+        int iy = std::clamp(static_cast<int>(v * src_size), 0, src_size - 1);
+        for (int sx = 0; sx < kSub; ++sx) {
+          double u = kCropMin + ((ox + (sx + 0.5) / kSub) / size) * kCropSpan;
+          int ix = std::clamp(static_cast<int>(u * src_size), 0, src_size - 1);
+          uint32_t px = src_pixels[static_cast<size_t>(iy) * src_size + ix];
+          uint8_t a = static_cast<uint8_t>(px >> 24);
+          uint8_t r = static_cast<uint8_t>((px >> 16) & 0xFF);
+          double w = std::clamp((r - 40.0) / 215.0, 0.0, 1.0) * (a / 255.0);
+          acc += w;
+        }
+      }
+      uint8_t oa = static_cast<uint8_t>(
+          std::clamp(std::round((acc / (kSub * kSub)) * 255.0), 0.0, 255.0));
+      if (oa > 0) {
+        any_alpha = true;
+        pixels[static_cast<size_t>(oy) * size + ox] =
+            (static_cast<uint32_t>(oa) << 24) |
+            (static_cast<uint32_t>(fg_r) << 16) |
+            (static_cast<uint32_t>(fg_g) << 8) | fg_b;
+      }
+    }
+  }
+
+  if (!any_alpha) {
+    DrawCircleAa(pixels.data(), size, size * 0.5, size * 0.5, size * 0.4, fg_r,
+                 fg_g, fg_b);
+  }
+
+  if (badged) {
+    double rad = size * 0.24;
+    double cx = size - rad - 0.5;
+    double cy = rad + 0.5;
+    const uint8_t ring_r = light_taskbar ? 242 : 17;
+    const uint8_t ring_g = light_taskbar ? 242 : 27;
+    const uint8_t ring_b = light_taskbar ? 242 : 33;
+    DrawCircleAa(pixels.data(), size, cx, cy, rad + 1.0, ring_r, ring_g,
+                 ring_b);
+    DrawCircleAa(pixels.data(), size, cx, cy, rad, 255, 59, 48);
+  }
+
+  return BuildIconFromPixels(pixels, size);
+}
 }  // namespace
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project,
@@ -430,6 +540,12 @@ void FlutterWindow::InitTrayChannel() {
                 close_to_tray_ = *v;
               }
             }
+            auto itMono = map->find(flutter::EncodableValue("monochrome"));
+            if (itMono != map->end()) {
+              if (const auto* v = std::get_if<bool>(&itMono->second)) {
+                monochrome_tray_ = *v;
+              }
+            }
             auto itLang = map->find(flutter::EncodableValue("lang"));
             if (itLang != map->end()) {
               if (const auto* v = std::get_if<std::string>(&itLang->second)) {
@@ -493,7 +609,13 @@ void FlutterWindow::CreateOrUpdateTrayIcon() {
   HICON prev_badge = badge_tray_icon_;
   HICON new_badge = nullptr;
   HICON active_icon = base_icon;
-  if (unread_count_ > 0 && base_icon) {
+  if (monochrome_tray_) {
+    new_badge = CreateMonochromeTrayIcon(sm_cx, IsWindowsSystemLightTheme(),
+                                         unread_count_ > 0);
+    if (new_badge) {
+      active_icon = new_badge;
+    }
+  } else if (unread_count_ > 0 && base_icon) {
     new_badge = CreateTrayBadgedIcon(base_icon, sm_cx);
     if (new_badge) {
       active_icon = new_badge;
@@ -697,6 +819,11 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     case WM_FONTCHANGE:
       if (flutter_controller_ && flutter_controller_->engine()) {
         flutter_controller_->engine()->ReloadSystemFonts();
+      }
+      break;
+    case WM_SETTINGCHANGE:
+      if (monochrome_tray_ && run_in_tray_) {
+        CreateOrUpdateTrayIcon();
       }
       break;
     case WM_DROPFILES: {

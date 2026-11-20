@@ -1297,6 +1297,7 @@ fn handle_command(
                         "auto_install_updates" => assign_bool(&mut p.auto_install_updates, v),
                         "run_in_tray" => assign_bool(&mut p.run_in_tray, v),
                         "close_to_tray" => assign_bool(&mut p.close_to_tray, v),
+                        "monochrome_tray_icon" => assign_bool(&mut p.monochrome_tray_icon, v),
                         "start_with_windows" => {
                             let ok = assign_bool(&mut p.start_with_windows, v);
                             if ok {
@@ -1598,6 +1599,7 @@ struct PrefsJson<'a> {
     auto_install_updates: bool,
     run_in_tray: bool,
     close_to_tray: bool,
+    monochrome_tray_icon: bool,
     start_with_windows: bool,
     chat_wallpaper_color: Option<&'a str>,
     chat_wallpaper_path: Option<&'a str>,
@@ -1624,6 +1626,7 @@ fn prefs_json<'a>(s: &'a crate::state::AppState) -> PrefsJson<'a> {
         auto_install_updates: p.auto_install_updates,
         run_in_tray: p.run_in_tray,
         close_to_tray: p.close_to_tray,
+        monochrome_tray_icon: p.monochrome_tray_icon,
         start_with_windows: p.start_with_windows,
         chat_wallpaper_color: p.chat_wallpaper_color.as_deref(),
         chat_wallpaper_path: p.chat_wallpaper_path.as_deref(),

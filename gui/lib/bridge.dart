@@ -368,6 +368,7 @@ class Prefs {
     this.autoInstallUpdates = false,
     this.runInTray = true,
     this.closeToTray = true,
+    this.monochromeTrayIcon = false,
     this.startWithWindows = false,
     this.chatWallpaperColor,
     this.chatWallpaperPath,
@@ -391,6 +392,7 @@ class Prefs {
   final bool autoInstallUpdates;
   final bool runInTray;
   final bool closeToTray;
+  final bool monochromeTrayIcon;
   final bool startWithWindows;
   final String? chatWallpaperColor;
   final String? chatWallpaperPath;
@@ -414,6 +416,7 @@ class Prefs {
         autoInstallUpdates: json['auto_install_updates'] as bool? ?? false,
         runInTray: json['run_in_tray'] as bool? ?? true,
         closeToTray: json['close_to_tray'] as bool? ?? true,
+        monochromeTrayIcon: json['monochrome_tray_icon'] as bool? ?? false,
         startWithWindows: json['start_with_windows'] as bool? ?? false,
         chatWallpaperColor: json['chat_wallpaper_color'] as String?,
         chatWallpaperPath: json['chat_wallpaper_path'] as String?,

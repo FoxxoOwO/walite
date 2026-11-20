@@ -1305,6 +1305,24 @@ class _SettingsDialogState extends State<SettingsDialog> {
                 value: prefs.runInTray,
                 onChanged: (v) => widget.bridge.setPref('run_in_tray', v),
               ),
+              SwitchListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: Text(tr.t(
+                    'Monochromatická ikona v oznamovací oblasti (Windows styl)',
+                    'Monochrome tray icon (Windows style)')),
+                subtitle: Text(
+                  tr.t(
+                    'Jednobarevná silueta ikony automaticky přizpůsobená tmavému nebo světlému panelu Windows.',
+                    'Single-color icon silhouette automatically adapted to dark or light Windows taskbar.',
+                  ),
+                  style: const TextStyle(
+                      fontSize: 11.5, color: WaPalette.textSecondary),
+                ),
+                value: prefs.monochromeTrayIcon,
+                onChanged: (v) =>
+                    widget.bridge.setPref('monochrome_tray_icon', v),
+              ),
             ],
           ),
         ),

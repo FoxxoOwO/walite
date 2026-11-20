@@ -406,6 +406,8 @@ pub struct UserPreferences {
     #[serde(default = "default_true")]
     pub close_to_tray: bool,
     #[serde(default)]
+    pub monochrome_tray_icon: bool,
+    #[serde(default)]
     pub start_with_windows: bool,
     /// Kontrolovat nové verze na pozadí.
     #[serde(default = "default_true")]
@@ -448,6 +450,7 @@ impl Default for UserPreferences {
             dark_theme_preset: 0,
             run_in_tray: true,
             close_to_tray: true,
+            monochrome_tray_icon: false,
             start_with_windows: false,
             check_updates: true,
             auto_install_updates: false,
