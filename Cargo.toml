@@ -1,6 +1,6 @@
 [package]
 name = "warust"
-version = "1.0.5"
+version = "1.0.6"
 edition = "2021"
 description = "WaLite — lightweight WhatsApp desktop client (Flutter GUI + Rust backend)"
 license = "MIT OR Apache-2.0"

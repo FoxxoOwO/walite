@@ -7,6 +7,11 @@ are also published on the [Releases page](https://github.com/FoxxoOwO/walite/rel
 
 ## [Unreleased]
 
+## [1.0.6] - 2026-11-20
+
+### Added
+- **Monochrome System Tray Icon (Windows Style)**: Added a `monochrome_tray_icon` preference in **Settings → System & startup → System Tray** (`Monochromatická ikona v oznamovací oblasti (Windows styl)`) that renders a 4×4 supersampled single-color speech-bubble + phone silhouette on a transparent background, automatically adapts to dark (`#FFFFFF`) or light (`#181818`) Windows taskbars (`SystemUsesLightTheme` / `WM_SETTINGCHANGE`), and preserves the unread badge indicator.
+
 ## [1.0.5] - 2026-11-19
 
 ### Fixed
