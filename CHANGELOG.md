@@ -7,6 +7,19 @@ are also published on the [Releases page](https://github.com/FoxxoOwO/walite/rel
 
 ## [Unreleased]
 
+## [1.0.8] - 2026-11-27
+
+### Security
+- **WebSocket Bridge Auth & Path Containment**: Added per-session token authentication (`warust/bridge.token`) and `Origin` header rejection (`403 Forbidden` / `401 Unauthorized` via `accept_hdr_async` + `authorize_handshake`) in `src/ws_bridge.rs` and `gui/lib/bridge.dart`, blocking cross-site WebSocket hijacking (CSWSH) and unauthorized local clients; restricted `open_file` and `show_in_folder` to canonicalized paths under the media and export directories (`is_allowed_local_path`).
+- **Updater Path Sanitization & Shell Quoting**: Sanitized the downloaded update filename via `Path::file_name()` in `src/updater.rs` and escaped shell-quoted variables in `unix_update_script`.
+
+### Fixed
+- **Audio Transcode Races**: Added playback generation tracking (`PLAY_GEN`) and generation-scoped temp WAV filenames in `src/audio.rs` so rapid track switches never clobber or double-start playback.
+- **Mentions, Export Paths, Notifications & Fallbacks**: Updated `message_mentions_me` (`src/backend.rs`) to strip `:device` suffixes and match mapped `lid_to_pn` aliases; switched `open_in_file_manager` (`src/export.rs`) to `.raw_arg()` for paths containing spaces; cleared `pending_read_receipts` on disconnect; capped concurrent Windows toast activation listener threads at `16`; replaced unsafe `current_dir().unwrap()` and `.chars().next().unwrap()` fallbacks; cleaned up deprecated `egui::Id::new` calls and unused imports.
+
+### Performance
+- **Idle Snapshot Skipping & Streaming WAV**: Added `snapshot_fingerprint()` in `src/ws_bridge.rs` to skip full JSON snapshot serialization on idle 200 ms ticks; streamed PCM WAV writes via `BufWriter` in `src/recorder.rs`; cleared `_msgKeys` on chat switch in `gui/lib/widgets/conversation_view.dart`.
+
 ## [1.0.7] - 2026-11-20
 
 ### Fixed
