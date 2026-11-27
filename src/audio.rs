@@ -13,6 +13,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -30,6 +31,8 @@ struct Inner {
     volume: f32,
     error: Option<String>,
 }
+
+static PLAY_GEN: AtomicU64 = AtomicU64::new(0);
 
 static STATE: Mutex<Inner> = Mutex::new(Inner {
     stream: None,
@@ -105,8 +108,9 @@ pub fn ffmpeg_available() -> bool {
     })
 }
 
-fn temp_wav_path(src: &Path) -> PathBuf {
-    // Stable per-source name so a re-download reuses the same transcode.
+fn temp_wav_path(src: &Path, gen: u64) -> PathBuf {
+    // Include playback generation so concurrent transcodes never overwrite or
+    // remove each other's temporary WAV file.
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in src.to_string_lossy().as_bytes() {
         hash ^= u64::from(*byte);
@@ -114,16 +118,16 @@ fn temp_wav_path(src: &Path) -> PathBuf {
     }
     let dir = std::env::temp_dir().join("warust-audio");
     let _ = std::fs::create_dir_all(&dir);
-    dir.join(format!("{hash:016x}.wav"))
+    dir.join(format!("{hash:016x}-{gen}.wav"))
 }
 
 /// Transcode to PCM WAV so rodio can play codecs it cannot decode itself
 /// (notably OGG/Opus voice notes).
-fn transcode_to_wav(src: &Path) -> Result<PathBuf, String> {
+fn transcode_to_wav(src: &Path, gen: u64) -> Result<PathBuf, String> {
     if !ffmpeg_available() {
         return Err("ffmpeg není k dispozici (nastav WARUST_FFMPEG nebo nainstaluj ffmpeg)".into());
     }
-    let out = temp_wav_path(src);
+    let out = temp_wav_path(src, gen);
     let status = hidden_command(ffmpeg_bin())
         .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
         .arg(src)
@@ -158,13 +162,13 @@ fn transcode_to_wav(src: &Path) -> Result<PathBuf, String> {
 }
 
 /// Open a rodio decoder, falling back to an ffmpeg transcode.
-fn open_source(path: &Path) -> Result<(rodio::Decoder<std::io::BufReader<std::fs::File>>, Option<PathBuf>), String> {
+fn open_source(path: &Path, gen: u64) -> Result<(rodio::Decoder<std::io::BufReader<std::fs::File>>, Option<PathBuf>), String> {
     match std::fs::File::open(path).map_err(|e| format!("{e}")) {
         Ok(file) => match rodio::Decoder::try_from(file) {
             Ok(dec) => Ok((dec, None)),
             Err(e) => {
                 debug!("rodio cannot decode {:?} ({e}), trying ffmpeg", path);
-                let wav = transcode_to_wav(path)?;
+                let wav = transcode_to_wav(path, gen)?;
                 let file = std::fs::File::open(&wav).map_err(|e| format!("{e}"))?;
                 let dec = rodio::Decoder::try_from(file).map_err(|e| format!("{e}"))?;
                 Ok((dec, Some(wav)))
@@ -215,6 +219,7 @@ pub fn set_error(message: String) {
 }
 
 fn play_inner(id: &str, path: &Path) -> Result<(), String> {
+    let gen = PLAY_GEN.fetch_add(1, Ordering::SeqCst) + 1;
     {
         let mut inner = lock();
         // Always stop whatever is running before switching tracks.
@@ -232,10 +237,16 @@ fn play_inner(id: &str, path: &Path) -> Result<(), String> {
 
     // Transcode/open off-lock so audio polling (`playing_id`, `position`, etc.)
     // never stalls behind a potentially slow ffmpeg subprocess.
-    let (decoder, temp) = open_source(path)?;
+    let (decoder, temp) = open_source(path, gen)?;
     let duration = Source::total_duration(&decoder);
 
     let mut inner = lock();
+    if PLAY_GEN.load(Ordering::SeqCst) != gen {
+        if let Some(unused) = temp {
+            let _ = std::fs::remove_file(unused);
+        }
+        return Ok(());
+    }
     ensure_stream(&mut inner)?;
 
     let player = {
@@ -258,6 +269,7 @@ fn play_inner(id: &str, path: &Path) -> Result<(), String> {
 }
 
 pub fn stop() {
+    PLAY_GEN.fetch_add(1, Ordering::SeqCst);
     let mut inner = lock();
     if let Some(p) = inner.player.take() {
         p.stop();
@@ -408,22 +420,24 @@ mod tests {
             "expected rodio to reject opus"
         );
 
-        let wav = transcode_to_wav(&ogg).expect("transcode");
+        let wav = transcode_to_wav(&ogg, 1).expect("transcode");
         let len = std::fs::metadata(&wav).unwrap().len();
         assert!(len > 1_000, "wav looks empty: {len} bytes");
 
-        let (decoder, extra) = open_source(&ogg).expect("open_source should fall back");
+        let (decoder, extra) = open_source(&ogg, 1).expect("open_source should fall back");
         assert_eq!(extra.as_deref(), Some(wav.as_path()));
         assert!(Source::total_duration(&decoder).is_some());
     }
 
     #[test]
     fn temp_paths_are_stable_per_source() {
-        let a = temp_wav_path(Path::new("/tmp/one.ogg"));
-        let b = temp_wav_path(Path::new("/tmp/one.ogg"));
-        let c = temp_wav_path(Path::new("/tmp/two.ogg"));
+        let a = temp_wav_path(Path::new("/tmp/one.ogg"), 1);
+        let b = temp_wav_path(Path::new("/tmp/one.ogg"), 1);
+        let c = temp_wav_path(Path::new("/tmp/two.ogg"), 1);
+        let d = temp_wav_path(Path::new("/tmp/one.ogg"), 2);
         assert_eq!(a, b);
         assert_ne!(a, c);
+        assert_ne!(a, d);
         assert_eq!(a.extension().unwrap(), "wav");
     }
 }

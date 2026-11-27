@@ -988,11 +988,51 @@ class Bridge {
   Stream<ProfileResult> get profileResults => _profileResults.stream;
   Stream<List<SearchHit>> get starredMessages => _starredMessages.stream;
 
+  String? _readBridgeToken() {
+    try {
+      String? base;
+      if (Platform.isWindows) {
+        base = Platform.environment['APPDATA'];
+      } else if (Platform.isMacOS) {
+        final home = Platform.environment['HOME'];
+        if (home != null && home.isNotEmpty) {
+          base = '$home/Library/Application Support';
+        }
+      } else {
+        final xdg = Platform.environment['XDG_DATA_HOME'];
+        if (xdg != null && xdg.isNotEmpty) {
+          base = xdg;
+        } else {
+          final home = Platform.environment['HOME'];
+          if (home != null && home.isNotEmpty) {
+            base = '$home/.local/share';
+          }
+        }
+      }
+      if (base == null || base.isEmpty) return null;
+      final file = File(
+        '$base${Platform.pathSeparator}warust${Platform.pathSeparator}bridge.token',
+      );
+      if (!file.existsSync()) return null;
+      final token = file.readAsStringSync().trim();
+      return token.isEmpty ? null : token;
+    } catch (_) {
+      return null;
+    }
+  }
+
   void connect() {
     if (_disposed || _connecting) return;
     _connecting = true;
     try {
-      final channel = WebSocketChannel.connect(Uri.parse('ws://127.0.0.1:$port'));
+      final token = _readBridgeToken();
+      final uri = Uri(
+        scheme: 'ws',
+        host: '127.0.0.1',
+        port: port,
+        queryParameters: token != null ? {'token': token} : null,
+      );
+      final channel = WebSocketChannel.connect(uri);
       _channel = channel;
       unawaited(
         channel.ready.then(

@@ -209,25 +209,38 @@ fn temp_path(ext: &str) -> PathBuf {
 }
 
 fn write_wav(path: &Path, samples: &[f32], rate: u32) -> Result<(), String> {
+    use std::io::{BufWriter, Write};
+
     let data_len = (samples.len() * 2) as u32;
-    let mut out = Vec::with_capacity(44 + data_len as usize);
-    out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&(36 + data_len).to_le_bytes());
-    out.extend_from_slice(b"WAVEfmt ");
-    out.extend_from_slice(&16u32.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    out.extend_from_slice(&1u16.to_le_bytes()); // mono
-    out.extend_from_slice(&rate.to_le_bytes());
-    out.extend_from_slice(&(rate * 2).to_le_bytes());
-    out.extend_from_slice(&2u16.to_le_bytes());
-    out.extend_from_slice(&16u16.to_le_bytes());
-    out.extend_from_slice(b"data");
-    out.extend_from_slice(&data_len.to_le_bytes());
+    let file = std::fs::File::create(path).map_err(|err| format!("nahrávku nelze uložit: {err}"))?;
+    let mut writer = BufWriter::new(file);
+
+    let mut header = [0u8; 44];
+    header[0..4].copy_from_slice(b"RIFF");
+    header[4..8].copy_from_slice(&(36 + data_len).to_le_bytes());
+    header[8..16].copy_from_slice(b"WAVEfmt ");
+    header[16..20].copy_from_slice(&16u32.to_le_bytes());
+    header[20..22].copy_from_slice(&1u16.to_le_bytes()); // PCM
+    header[22..24].copy_from_slice(&1u16.to_le_bytes()); // mono
+    header[24..28].copy_from_slice(&rate.to_le_bytes());
+    header[28..32].copy_from_slice(&(rate * 2).to_le_bytes());
+    header[32..34].copy_from_slice(&2u16.to_le_bytes());
+    header[34..36].copy_from_slice(&16u16.to_le_bytes());
+    header[36..40].copy_from_slice(b"data");
+    header[40..44].copy_from_slice(&data_len.to_le_bytes());
+    writer
+        .write_all(&header)
+        .map_err(|err| format!("nahrávku nelze uložit: {err}"))?;
+
     for sample in samples {
         let value = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-        out.extend_from_slice(&value.to_le_bytes());
+        writer
+            .write_all(&value.to_le_bytes())
+            .map_err(|err| format!("nahrávku nelze uložit: {err}"))?;
     }
-    std::fs::write(path, out).map_err(|err| format!("nahrávku nelze uložit: {err}"))
+    writer
+        .flush()
+        .map_err(|err| format!("nahrávku nelze uložit: {err}"))
 }
 
 fn encode_opus(wav: &Path) -> Result<PathBuf, String> {

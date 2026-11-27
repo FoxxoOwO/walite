@@ -166,7 +166,9 @@ pub fn download(url: &str) -> Result<PathBuf> {
     let name = url
         .rsplit('/')
         .next()
-        .filter(|name| !name.is_empty())
+        .and_then(|segment| Path::new(segment).file_name())
+        .and_then(|os| os.to_str())
+        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
         .unwrap_or("warust-update");
     let path = std::env::temp_dir().join(name);
     // Tělo se teče rovnou do souboru, ne přes `read_to_vec()`: ten má v ureq 3
@@ -258,6 +260,11 @@ fn windows_update_script(pid: u32, dir: &Path, exe: &Path, archive: &Path) -> St
     )
 }
 
+#[cfg(not(windows))]
+fn sh_single_quote(value: &Path) -> String {
+    value.to_string_lossy().replace('\'', "'\"'\"'")
+}
+
 /// Skript pro Unix, který počká na ukončení procesu, rozbalí archiv a aplikaci
 /// znovu spustí.
 #[cfg(not(windows))]
@@ -266,22 +273,25 @@ fn unix_update_script(pid: u32, dir: &Path, exe: &Path, archive: &Path) -> Strin
         "#!/bin/sh\n\
          log=\"${{TMPDIR:-/tmp}}/warust-update.log\"\n\
          stage=\"${{TMPDIR:-/tmp}}/warust-unpack\"\n\
+         zip='{zip}'\n\
+         dir='{dir}'\n\
+         exe='{exe}'\n\
          while kill -0 {pid} 2>/dev/null; do sleep 1; done\n\
          rm -rf \"$stage\"\n\
          mkdir -p \"$stage\"\n\
-         if tar -xzf \"{zip}\" -C \"$stage\" >>\"$log\" 2>&1; then\n\
-         \x20 cp -f \"$stage\"/* \"{dir}/\" >>\"$log\" 2>&1\n\
+         if tar -xzf \"$zip\" -C \"$stage\" >>\"$log\" 2>&1; then\n\
+         \x20 cp -f \"$stage\"/* \"$dir/\" >>\"$log\" 2>&1\n\
          \x20 echo aktualizace rozbalena >>\"$log\"\n\
          else\n\
          \x20 echo rozbaleni selhalo, zustava stara verze >>\"$log\"\n\
          fi\n\
          rm -rf \"$stage\"\n\
-         rm -f \"{zip}\"\n\
-         \"{exe}\" >/dev/null 2>&1 &\n",
+         rm -f \"$zip\"\n\
+         \"$exe\" >/dev/null 2>&1 &\n",
         pid = pid,
-        dir = dir.display(),
-        exe = exe.display(),
-        zip = archive.display(),
+        dir = sh_single_quote(dir),
+        exe = sh_single_quote(exe),
+        zip = sh_single_quote(archive),
     )
 }
 

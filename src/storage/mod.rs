@@ -124,7 +124,7 @@ pub struct Store {
 impl Store {
     pub fn default_location() -> Self {
         let dir = dirs::data_dir()
-            .unwrap_or_else(|| std::env::current_dir().unwrap())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
             .join("warust");
         Self { dir }
     }

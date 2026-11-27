@@ -5,7 +5,8 @@
 //! WhatsApp handling is duplicated on the UI side.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -18,6 +19,8 @@ use serde_json::{json, Value};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Notify;
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use whatsapp_rust::wacore_binary::Jid;
 
@@ -70,9 +73,286 @@ fn sync_connection_status(backend: &BackendHandle) {
     }
 }
 
+fn bridge_token_path() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .join("warust")
+        .join("bridge.token")
+}
+
+fn write_bridge_token(token: &str) -> Result<()> {
+    let path = bridge_token_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("token.tmp");
+    std::fs::write(&tmp, token.as_bytes())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    if std::fs::rename(&tmp, &path).is_err() {
+        std::fs::write(&path, token.as_bytes())?;
+        let _ = std::fs::remove_file(&tmp);
+    }
+    Ok(())
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+fn authorize_handshake(req: &Request, expected_token: &str) -> std::result::Result<(), StatusCode> {
+    // Browsers always attach an `Origin` header on cross-site WebSocket handshakes;
+    // native desktop clients do not. Rejecting any `Origin` blocks CSWSH outright.
+    if req.headers().contains_key("origin") {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let provided = req
+        .uri()
+        .query()
+        .and_then(|q| {
+            q.split('&').find_map(|pair| {
+                let (k, v) = pair.split_once('=')?;
+                (k == "token").then_some(v)
+            })
+        })
+        .unwrap_or("");
+    if !constant_time_eq(provided.as_bytes(), expected_token.as_bytes()) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(())
+}
+
+fn is_allowed_local_path_with_roots(path: &Path, roots: &[PathBuf]) -> bool {
+    let Ok(canon) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    roots.iter().any(|root| {
+        std::fs::canonicalize(root)
+            .map(|r| canon.starts_with(&r))
+            .unwrap_or(false)
+    })
+}
+
+fn is_allowed_local_path(path: &Path) -> bool {
+    let roots = [
+        crate::media::media_dir(),
+        crate::export::default_export_dir(),
+    ];
+    is_allowed_local_path_with_roots(path, &roots)
+}
+
+fn hash_value<T: Hash>(value: &T) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut h);
+    h.finish()
+}
+
+/// Fast change detector for the 200 ms snapshot loop so idle ticks avoid
+/// allocating and serializing megabytes of JSON just to compare strings.
+fn snapshot_fingerprint(state: &SharedState) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    crate::avatars::revision().hash(&mut h);
+    crate::media::MEDIA_REV.load(Ordering::Relaxed).hash(&mut h);
+    MESSAGE_LIMIT.load(Ordering::Relaxed).hash(&mut h);
+
+    if let Some(playing_id) = crate::audio::playing_id() {
+        1u8.hash(&mut h);
+        playing_id.hash(&mut h);
+        crate::audio::is_paused().hash(&mut h);
+        (crate::audio::position().as_millis() as u64).hash(&mut h);
+        crate::audio::duration().map(|d| d.as_millis() as u64).hash(&mut h);
+    } else {
+        0u8.hash(&mut h);
+    }
+
+    let s = state.read();
+    s.dirty.hash(&mut h);
+    s.self_jid.as_ref().map(|j| j.to_string()).hash(&mut h);
+    s.self_name.hash(&mut h);
+    s.self_status.hash(&mut h);
+    s.selected_chat.as_ref().map(|j| j.to_string()).hash(&mut h);
+    s.search_query.hash(&mut h);
+    s.auto_scroll_to_bottom.hash(&mut h);
+
+    match &s.connection {
+        ConnectionStatus::Disconnected => 0u8.hash(&mut h),
+        ConnectionStatus::Connecting => 1u8.hash(&mut h),
+        ConnectionStatus::QrCode(c) => {
+            2u8.hash(&mut h);
+            c.hash(&mut h);
+        }
+        ConnectionStatus::PairCode(c) => {
+            3u8.hash(&mut h);
+            c.hash(&mut h);
+        }
+        ConnectionStatus::Connected => 4u8.hash(&mut h),
+        ConnectionStatus::Syncing(p) => {
+            5u8.hash(&mut h);
+            p.hash(&mut h);
+        }
+        ConnectionStatus::Error(e) => {
+            6u8.hash(&mut h);
+            e.hash(&mut h);
+        }
+    }
+
+    let mut chats_acc = 0u64;
+    s.chats.len().hash(&mut h);
+    for (jid, c) in &s.chats {
+        let mut ch = std::collections::hash_map::DefaultHasher::new();
+        jid.to_string().hash(&mut ch);
+        c.name.hash(&mut ch);
+        c.unread_count.hash(&mut ch);
+        c.is_group.hash(&mut ch);
+        c.is_archived.hash(&mut ch);
+        c.is_pinned.hash(&mut ch);
+        c.is_muted().hash(&mut ch);
+        c.is_currently_typing().hash(&mut ch);
+        c.participants.len().hash(&mut ch);
+        c.last_activity.timestamp_millis().hash(&mut ch);
+        s.drafts.get(jid).hash(&mut ch);
+        if let Some(last) = &c.last_message {
+            last.text.hash(&mut ch);
+            last.timestamp.timestamp_millis().hash(&mut ch);
+            (last.status as u8).hash(&mut ch);
+        }
+        chats_acc = chats_acc.wrapping_add(ch.finish());
+    }
+    chats_acc.hash(&mut h);
+
+    if let Some(sel) = s.selected_chat.as_ref() {
+        let list_len = s.get_chat_messages(sel).map_or(0, |m| m.len());
+        list_len.hash(&mut h);
+        if let Some(list) = s.get_chat_messages(sel) {
+            let window = MESSAGE_LIMIT.load(Ordering::Relaxed);
+            for m in list.iter().skip(list.len().saturating_sub(window)) {
+                m.id.hash(&mut h);
+                m.text.len().hash(&mut h);
+                (m.status as u8).hash(&mut h);
+                m.edited.hash(&mut h);
+                m.starred.hash(&mut h);
+                m.view_once_opened.hash(&mut h);
+                m.media_path.hash(&mut h);
+                m.reactions.len().hash(&mut h);
+                if let Some(p) = &m.poll {
+                    p.total_voters().hash(&mut h);
+                }
+            }
+        }
+        if let Some(pin) = s.pinned.get(sel) {
+            (!pin.expired()).hash(&mut h);
+            pin.message_id.hash(&mut h);
+        }
+        s.ephemeral.get(sel).hash(&mut h);
+        if let Some(gi) = s.group_info.get(&sel.to_string()) {
+            gi.subject.hash(&mut h);
+            gi.description.hash(&mut h);
+            gi.admins.len().hash(&mut h);
+            gi.is_locked.hash(&mut h);
+            gi.is_announcement.hash(&mut h);
+            gi.invite_link.hash(&mut h);
+        }
+    }
+
+    let mut contacts_acc = 0u64;
+    s.contacts.len().hash(&mut h);
+    for (jid, c) in &s.contacts {
+        let mut ch = std::collections::hash_map::DefaultHasher::new();
+        jid.to_string().hash(&mut ch);
+        c.name.hash(&mut ch);
+        c.push_name.hash(&mut ch);
+        c.verified_name.hash(&mut ch);
+        c.is_blocked.hash(&mut ch);
+        c.is_online.hash(&mut ch);
+        c.last_seen.map(|t| t.timestamp_millis()).hash(&mut ch);
+        contacts_acc = contacts_acc.wrapping_add(ch.finish());
+    }
+    contacts_acc.hash(&mut h);
+
+    s.history_syncing_chats.len().hash(&mut h);
+    s.history_exhausted_chats.len().hash(&mut h);
+    s.scheduled_messages.len().hash(&mut h);
+    for m in &s.scheduled_messages {
+        m.id.hash(&mut h);
+        m.scheduled_for.timestamp_millis().hash(&mut h);
+        match &m.status {
+            ScheduledStatus::Pending => 0u8.hash(&mut h),
+            ScheduledStatus::Sent => 1u8.hash(&mut h),
+            ScheduledStatus::Cancelled => 2u8.hash(&mut h),
+            ScheduledStatus::Failed(err) => {
+                3u8.hash(&mut h);
+                err.hash(&mut h);
+            }
+        }
+    }
+
+    if let Some(c) = &s.active_call {
+        c.call_id.hash(&mut h);
+        c.is_muted.hash(&mut h);
+        c.is_video_enabled.hash(&mut h);
+        c.connected_at.map(|t| t.timestamp_millis()).hash(&mut h);
+        match &c.status {
+            CallStatus::Incoming => 0u8.hash(&mut h),
+            CallStatus::OutgoingRinging => 1u8.hash(&mut h),
+            CallStatus::Connected => 2u8.hash(&mut h),
+            CallStatus::Ended(r) => {
+                3u8.hash(&mut h);
+                r.hash(&mut h);
+            }
+        }
+    }
+
+    hash_value(&s.update_status.label()).hash(&mut h);
+    s.update_available.as_ref().map(|u| &u.tag).hash(&mut h);
+    let p = &s.preferences;
+    (
+        p.enter_is_send,
+        p.sound_notifications,
+        p.show_previews,
+        p.desktop_notifications,
+        p.auto_download_photos,
+        p.auto_download_videos,
+        p.auto_download_docs,
+        p.font_size.to_bits(),
+        p.dark_theme_preset,
+        p.language.code(),
+        p.check_updates,
+        p.auto_install_updates,
+    )
+        .hash(&mut h);
+    (
+        p.run_in_tray,
+        p.close_to_tray,
+        p.monochrome_tray_icon,
+        p.start_with_windows,
+        &p.chat_wallpaper_color,
+        &p.chat_wallpaper_path,
+        p.chat_wallpaper_doodles,
+        &p.notification_sound,
+        &p.custom_sound_path,
+    )
+        .hash(&mut h);
+
+    h.finish()
+}
+
 pub async fn run(port: u16) -> Result<()> {
     // Headless bridge starts unfocused until a connected GUI reports focus.
     crate::notifications::set_window_focused(false);
+    let bridge_token: Arc<str> = Arc::from(uuid::Uuid::new_v4().to_string());
+    if let Err(err) = write_bridge_token(&bridge_token) {
+        tracing::warn!("Could not persist bridge auth token: {err}");
+    }
     let loaded = crate::storage::load_state().await.unwrap_or_default();
     crate::i18n::set_language(loaded.preferences.language);
     crate::notifications::configure_sound(
@@ -101,10 +381,13 @@ pub async fn run(port: u16) -> Result<()> {
         let snap_notify = snap_notify.clone();
         tokio::spawn(async move {
             let mut last = String::new();
+            let mut last_fp: Option<u64> = None;
             loop {
+                let mut forced = false;
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_millis(200)) => {}
                     _ = snap_notify.notified() => {
+                        forced = true;
                         // Brief coalesce window so a burst of commands emits one snapshot.
                         tokio::time::sleep(Duration::from_millis(16)).await;
                     }
@@ -113,6 +396,11 @@ pub async fn run(port: u16) -> Result<()> {
                     continue;
                 }
                 sync_connection_status(&backend);
+                let fp = snapshot_fingerprint(&state);
+                if !forced && last_fp == Some(fp) {
+                    continue;
+                }
+                last_fp = Some(fp);
                 let snap = snapshot(&state);
                 if snap == last {
                     continue;
@@ -169,6 +457,7 @@ pub async fn run(port: u16) -> Result<()> {
             clients.clone(),
             backend.clone(),
             snap_notify.clone(),
+            bridge_token.clone(),
         ));
     }
 }
@@ -179,8 +468,24 @@ async fn handle_conn(
     clients: Clients,
     backend: Arc<BackendHandle>,
     snap_notify: Arc<Notify>,
+    expected_token: Arc<str>,
 ) {
-    let ws = match tokio_tungstenite::accept_async(stream).await {
+    let token_for_cb = expected_token.clone();
+    let ws = match tokio_tungstenite::accept_hdr_async(
+        stream,
+        move |req: &Request, resp: Response| -> std::result::Result<Response, ErrorResponse> {
+            match authorize_handshake(req, &token_for_cb) {
+                Ok(()) => Ok(resp),
+                Err(status) => {
+                    let mut err_resp = ErrorResponse::new(Some("Unauthorized".into()));
+                    *err_resp.status_mut() = status;
+                    Err(err_resp)
+                }
+            }
+        },
+    )
+    .await
+    {
         Ok(ws) => ws,
         Err(err) => {
             tracing::warn!("bridge handshake failed: {err}");
@@ -546,13 +851,27 @@ fn handle_command(
         Some("open_file") => {
             notify_snap = false;
             if let Some(path) = value["path"].as_str().map(str::to_string) {
-                tokio::task::spawn_blocking(move || crate::media::open_file(Path::new(&path)));
+                tokio::task::spawn_blocking(move || {
+                    let p = Path::new(&path);
+                    if is_allowed_local_path(p) {
+                        crate::media::open_file(p);
+                    } else {
+                        tracing::warn!("blocked open_file outside allowed directories: {}", path);
+                    }
+                });
             }
         }
         Some("show_in_folder") => {
             notify_snap = false;
             if let Some(path) = value["path"].as_str().map(str::to_string) {
-                tokio::task::spawn_blocking(move || crate::media::show_in_folder(Path::new(&path)));
+                tokio::task::spawn_blocking(move || {
+                    let p = Path::new(&path);
+                    if is_allowed_local_path(p) {
+                        crate::media::show_in_folder(p);
+                    } else {
+                        tracing::warn!("blocked show_in_folder outside allowed directories: {}", path);
+                    }
+                });
             }
         }
         Some("open_media_dir") => {
@@ -2508,5 +2827,56 @@ mod tests {
         let rev = crate::media::MEDIA_REV.load(Ordering::Relaxed);
         let _ = sticker_paths_cached();
         assert_eq!(STICKER_CACHE.lock().0, Some(rev));
+    }
+
+    #[test]
+    fn authorize_handshake_enforces_token_and_origin() {
+        let valid_req = Request::builder()
+            .uri("ws://127.0.0.1:8787/?token=secret-123")
+            .body(())
+            .unwrap();
+        assert_eq!(authorize_handshake(&valid_req, "secret-123"), Ok(()));
+
+        let wrong_token = Request::builder()
+            .uri("ws://127.0.0.1:8787/?token=wrong")
+            .body(())
+            .unwrap();
+        assert_eq!(
+            authorize_handshake(&wrong_token, "secret-123"),
+            Err(StatusCode::UNAUTHORIZED)
+        );
+
+        let missing_token = Request::builder()
+            .uri("ws://127.0.0.1:8787/")
+            .body(())
+            .unwrap();
+        assert_eq!(
+            authorize_handshake(&missing_token, "secret-123"),
+            Err(StatusCode::UNAUTHORIZED)
+        );
+
+        let browser_origin = Request::builder()
+            .uri("ws://127.0.0.1:8787/?token=secret-123")
+            .header("Origin", "https://evil.example")
+            .body(())
+            .unwrap();
+        assert_eq!(
+            authorize_handshake(&browser_origin, "secret-123"),
+            Err(StatusCode::FORBIDDEN)
+        );
+    }
+
+    #[test]
+    fn allowed_local_path_checks_media_and_export_dirs() {
+        let temp = tempfile::tempdir().unwrap();
+        let allowed_root = temp.path().join("media");
+        let outside = temp.path().join("system.exe");
+        std::fs::create_dir_all(&allowed_root).unwrap();
+        let ok_file = allowed_root.join("photo.jpg");
+        std::fs::write(&ok_file, b"img").unwrap();
+        std::fs::write(&outside, b"bad").unwrap();
+
+        assert!(is_allowed_local_path_with_roots(&ok_file, &[allowed_root.clone()]));
+        assert!(!is_allowed_local_path_with_roots(&outside, &[allowed_root]));
     }
 }

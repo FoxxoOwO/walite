@@ -19,7 +19,7 @@ const REFRESH_AFTER: Duration = Duration::from_secs(24 * 3600);
 
 fn dir() -> PathBuf {
     dirs::data_dir()
-        .unwrap_or_else(|| std::env::current_dir().unwrap())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
         .join("warust")
         .join("avatars")
 }
@@ -161,7 +161,7 @@ type Cache = Arc<Mutex<HashMap<Jid, (u64, Option<egui::TextureHandle>)>>>;
 
 /// Returns the decoded texture for a chat's picture, if one is cached on disk.
 pub fn texture(ctx: &egui::Context, jid: &Jid) -> Option<egui::TextureHandle> {
-    let id = egui::Id::new("warust_avatar_cache");
+    let id = egui::Id::unique("warust_avatar_cache");
     let cache: Cache = ctx.data_mut(|d| d.get_temp::<Cache>(id)).unwrap_or_else(|| {
         let c: Cache = Arc::new(Mutex::new(HashMap::new()));
         ctx.data_mut(|d| d.insert_temp(id, c.clone()));

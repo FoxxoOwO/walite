@@ -30,7 +30,7 @@ pub fn show_view_once_modal(ctx: &egui::Context, state: &SharedState, backend: &
 
     let mut close = false;
     egui::Window::new("Zobrazit jednou")
-        .id(egui::Id::new("view_once_modal"))
+        .id(egui::Id::unique("view_once_modal"))
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))

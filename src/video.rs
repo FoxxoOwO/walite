@@ -9,7 +9,7 @@
 //! fixed height, and turned into an egui texture on demand.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -557,6 +557,7 @@ pub fn progress() -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
     use super::*;
 
     /// Both ffmpeg tests drive the one global player, so they must not overlap.

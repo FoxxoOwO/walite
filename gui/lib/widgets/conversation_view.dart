@@ -171,6 +171,9 @@ class ConversationViewState extends State<ConversationView> {
       _recSecs = 0;
     }
     _lastSelectedChat = s.selected;
+    if (prev != s.selected) {
+      _msgKeys.clear();
+    }
     _selectedMsgIds.clear();
     _multiPollDrafts.clear();
     _reply = null;

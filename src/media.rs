@@ -13,7 +13,7 @@ pub static MEDIA_REV: AtomicU64 = AtomicU64::new(1);
 /// Directory for local media storage: `%APPDATA%/warust/media`
 pub fn media_dir() -> PathBuf {
     dirs::data_dir()
-        .unwrap_or_else(|| std::env::current_dir().unwrap())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
         .join("warust")
         .join("media")
 }
@@ -135,7 +135,7 @@ pub fn sticker_files() -> Vec<PathBuf> {
 
 /// Texture for an arbitrary image file, cached by path.
 pub fn path_texture(ctx: &egui::Context, path: &Path) -> Option<egui::TextureHandle> {
-    let id = egui::Id::new("warust_path_texture_cache");
+    let id = egui::Id::unique("warust_path_texture_cache");
     let cache: MediaCache = ctx.data_mut(|d| d.get_temp::<MediaCache>(id)).unwrap_or_else(|| {
         let c: MediaCache = Arc::new(Mutex::new(HashMap::new()));
         ctx.data_mut(|d| d.insert_temp(id, c.clone()));
@@ -367,7 +367,7 @@ pub fn image_texture(
     ctx: &egui::Context,
     msg: &Message,
 ) -> Option<(egui::TextureHandle, [f32; 2])> {
-    let id = egui::Id::new("warust_media_texture_cache");
+    let id = egui::Id::unique("warust_media_texture_cache");
     let cache: MediaCache = ctx.data_mut(|d| d.get_temp::<MediaCache>(id)).unwrap_or_else(|| {
         let c: MediaCache = Arc::new(Mutex::new(HashMap::new()));
         ctx.data_mut(|d| d.insert_temp(id, c.clone()));

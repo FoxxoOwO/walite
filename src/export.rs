@@ -386,9 +386,10 @@ pub fn save_export(
 pub fn open_in_file_manager(path: &Path) {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         if path.is_file() {
             let _ = std::process::Command::new("explorer")
-                .arg(format!("/select,\"{}\"", path.display()))
+                .raw_arg(format!("/select,\"{}\"", path.display()))
                 .spawn();
         } else {
             let _ = std::process::Command::new("explorer")

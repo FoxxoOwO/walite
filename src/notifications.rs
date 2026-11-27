@@ -8,7 +8,7 @@
 //! the same way, and it is the difference between a usable client and one that
 //! toasts about messages you are already looking at.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
@@ -159,10 +159,29 @@ pub fn show_toast(title: &str, body: &str) -> bool {
     show_toast_for_chat(None, title, body)
 }
 
+const MAX_ACTIVATION_LISTENERS: usize = 16;
+static ACTIVE_ACTIVATION_LISTENERS: AtomicUsize = AtomicUsize::new(0);
+
 fn spawn_activation_listener(handle: notify_rust::NotificationHandle, chat_jid: Option<String>) {
     #[cfg(target_os = "windows")]
     {
+        if ACTIVE_ACTIVATION_LISTENERS
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n < MAX_ACTIVATION_LISTENERS).then_some(n + 1)
+            })
+            .is_err()
+        {
+            debug!("skipping toast activation listener: {} active listeners", MAX_ACTIVATION_LISTENERS);
+            return;
+        }
+        struct ListenerGuard;
+        impl Drop for ListenerGuard {
+            fn drop(&mut self) {
+                ACTIVE_ACTIVATION_LISTENERS.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
         std::thread::spawn(move || {
+            let _guard = ListenerGuard;
             let _ = handle.wait_for_response(|resp: &notify_rust::NotificationResponse| {
                 if matches!(
                     resp,

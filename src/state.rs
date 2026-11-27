@@ -974,8 +974,11 @@ pub fn is_reaction_only(text: &str) -> bool {
     ) {
         return true;
     }
-    if stripped.chars().count() == 1 && is_emoji_char(stripped.chars().next().unwrap()) {
-        return true;
+    let mut chars = stripped.chars();
+    if let (Some(first), None) = (chars.next(), chars.next()) {
+        if is_emoji_char(first) {
+            return true;
+        }
     }
     false
 }

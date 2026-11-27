@@ -26,10 +26,19 @@ pub struct CallManager {
     pub video_tx: tokio::sync::Mutex<Option<async_channel::Sender<Vec<u8>>>>,
 }
 
+fn bare_jid_user(raw: &str) -> &str {
+    raw.split('@')
+        .next()
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default()
+}
+
 /// Whether the message names us through `ContextInfo.mentioned_jid` (a group @mention).
 ///
 /// Mentions are plain JID strings, so the comparison ignores any device suffix
-/// and looks at the user part only.
+/// (`:12`) and also matches LID aliases mapped to `self_jid`.
 fn message_mentions_me(message: &wa::Message, state: &crate::state::AppState) -> bool {
     let Some(ctx) = find_context_info_ref(message) else {
         return false;
@@ -40,11 +49,20 @@ fn message_mentions_me(message: &wa::Message, state: &crate::state::AppState) ->
     let Some(me) = state.self_jid.as_ref() else {
         return false;
     };
-    let me = me.to_string();
-    let me_user = me.split('@').next().unwrap_or_default();
-    ctx.mentioned_jid
+    let me_bare = bare_jid_user(&me.user);
+    let my_lid_users: Vec<&str> = state
+        .lid_to_pn
         .iter()
-        .any(|mentioned| mentioned.split('@').next().unwrap_or_default() == me_user)
+        .filter_map(|(lid, pn)| {
+            (bare_jid_user(&pn.user) == me_bare || bare_jid_user(&lid.user) == me_bare)
+                .then_some([bare_jid_user(&lid.user), bare_jid_user(&pn.user)])
+        })
+        .flatten()
+        .collect();
+    ctx.mentioned_jid.iter().any(|mentioned| {
+        let user = bare_jid_user(mentioned);
+        !user.is_empty() && (user == me_bare || my_lid_users.contains(&user))
+    })
 }
 
 /// Helper function to find ContextInfo in a message (replaces find_context_info_ref! macro)
@@ -581,7 +599,7 @@ pub async fn spawn_backend(state: SharedState) -> Result<BackendHandle> {
     
     // Determine data directory and session database path
     let data_dir = dirs::data_dir()
-        .unwrap_or_else(|| std::env::current_dir().unwrap())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
         .join("warust");
     std::fs::create_dir_all(&data_dir)?;
 
@@ -4307,6 +4325,7 @@ async fn handle_command(
                     s.group_info_pending.clear();
                     s.scheduled_messages.clear();
                     s.pending_reactions.clear();
+                    s.pending_read_receipts.clear();
                     s.history_syncing_chats.clear();
                     s.history_exhausted_chats.clear();
                     s.active_call = None;
@@ -4405,5 +4424,36 @@ mod tests {
             ..Default::default()
         };
         assert!(!is_status_story_message(&dm_jid, &reply_to_story));
+    }
+
+    #[test]
+    fn message_mentions_me_handles_device_suffix_and_lid_mapping() {
+        let mut state = crate::state::AppState::default();
+        let my_pn_with_device: Jid = "420123456789:5@s.whatsapp.net".parse().unwrap();
+        let my_pn: Jid = "420123456789@s.whatsapp.net".parse().unwrap();
+        let my_lid: Jid = "999888777@lid".parse().unwrap();
+        state.self_jid = Some(my_pn_with_device);
+        state.lid_to_pn.insert(my_lid, my_pn);
+
+        let mention = |jid_str: &str| wa::Message {
+            extended_text_message: whatsapp_rust::waproto::buffa::MessageField::some(
+                wa::message::ExtendedTextMessage {
+                    text: Some("Ahoj".to_string()),
+                    context_info: whatsapp_rust::waproto::buffa::MessageField::some(
+                        wa::ContextInfo {
+                            mentioned_jid: vec![jid_str.to_string()],
+                            ..Default::default()
+                        },
+                    ),
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        };
+
+        assert!(message_mentions_me(&mention("420123456789@s.whatsapp.net"), &state));
+        assert!(message_mentions_me(&mention("420123456789:12@s.whatsapp.net"), &state));
+        assert!(message_mentions_me(&mention("999888777@lid"), &state));
+        assert!(!message_mentions_me(&mention("420999000111@s.whatsapp.net"), &state));
     }
 }
